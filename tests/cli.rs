@@ -5,6 +5,7 @@ use object::{
     SymbolKind, SymbolScope,
 };
 use predicates::prelude::*;
+use serde_json::Value;
 use std::{
     fs,
     path::Path,
@@ -189,6 +190,17 @@ fn cli_disassembles_aarch64_raw_bytes() {
         .assert()
         .success()
         .stdout(predicate::str::contains("ret"));
+}
+
+#[test]
+fn cli_omits_syntax_metadata_for_aarch64_raw_bytes() {
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .args(["--raw-hex", "c0 03 5f d6", "--arch", "aarch64"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("architecture: aarch64"))
+        .stdout(predicate::str::contains("syntax").not());
 }
 
 #[test]
@@ -449,6 +461,74 @@ fn cli_rejects_symbol_filter_for_raw_hex_input() {
         .failure()
         .stderr(predicate::str::contains(
             "--symbol is only supported when disassembling files",
+        ));
+}
+
+#[test]
+fn cli_rejects_section_filter_for_raw_hex_input() {
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .args(["--raw-hex", "c3", "--arch", "x86-64", "--section", ".text"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--section is only supported when disassembling files",
+        ));
+}
+
+#[test]
+fn cli_rejects_all_sections_for_raw_hex_input() {
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .args(["--raw-hex", "c3", "--arch", "x86-64", "--all-sections"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "--all-sections is only supported when disassembling files",
+        ));
+}
+
+#[test]
+fn cli_can_emit_json_output_with_analysis() {
+    let output = Command::cargo_bin("assembler")
+        .unwrap()
+        .args([
+            "--raw-hex",
+            "55 48 89 e5 48 83 ec 20 31 c0 c6 44 05 f0 41 48 83 c0 01 48 83 f8 40 75 f1 c9 c3",
+            "--arch",
+            "x86-64",
+            "--analyze",
+            "--output",
+            "json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+
+    let value: Value = serde_json::from_slice(&output).unwrap();
+    assert!(value.get("disassembly").is_some());
+    assert!(value.get("analysis").is_some());
+    assert!(value["analysis"]["findings"].is_array());
+}
+
+#[test]
+fn cli_can_exit_non_zero_when_analysis_finds_risk() {
+    Command::cargo_bin("assembler")
+        .unwrap()
+        .args([
+            "--raw-hex",
+            "55 48 89 e5 48 83 ec 20 31 c0 c6 44 05 f0 41 48 83 c0 01 48 83 f8 40 75 f1 c9 c3",
+            "--arch",
+            "x86-64",
+            "--analyze",
+            "--analyze-exit-code",
+        ])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "potential-stack-buffer-write-risk",
         ));
 }
 

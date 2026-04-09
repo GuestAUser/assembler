@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 use clap::{Parser, ValueEnum};
 
-use crate::disasm::{Architecture, DisasmInput, DisasmRequest, RenderOptions, Syntax};
+use crate::types::{Architecture, DisasmInput, DisasmRequest, RenderOptions, Syntax};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -52,9 +52,17 @@ pub struct Cli {
     #[arg(long, value_enum, default_value_t = CliRender::Auto)]
     pub render: CliRender,
 
+    /// Select text or JSON output.
+    #[arg(long, value_enum, default_value_t = CliOutput::Text)]
+    pub output: CliOutput,
+
     /// Run conservative semantic risk analysis on decoded disassembly.
     #[arg(long)]
     pub analyze: bool,
+
+    /// Exit with code 1 when --analyze produces one or more findings.
+    #[arg(long, requires = "analyze")]
+    pub analyze_exit_code: bool,
 }
 
 impl Cli {
@@ -170,6 +178,12 @@ impl CliRender {
             Self::Plain => false,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum CliOutput {
+    Text,
+    Json,
 }
 
 fn parse_u64(raw: &str) -> Result<u64> {

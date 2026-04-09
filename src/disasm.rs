@@ -17,7 +17,7 @@ const MAX_RENDERED_INSTRUCTION_BYTES: usize = 16;
 const BYTE_COLUMN_WIDTH: usize = MAX_RENDERED_INSTRUCTION_BYTES * 3;
 const MAX_INPUT_FILE_SIZE: u64 = 128 * 1024 * 1024;
 const MNEMONIC_COLUMN_WIDTH: usize = 12;
-const MAX_RAW_INPUT_BYTES: usize = 16 * 1024;
+const MAX_RAW_INPUT_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct DisasmRequest {

@@ -6,7 +6,9 @@ use object::{
 };
 use predicates::prelude::*;
 use std::{
-    fs, process,
+    fs,
+    path::Path,
+    process,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,6 +18,14 @@ fn unique_temp_path(label: &str) -> std::path::PathBuf {
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!("assembler-{label}-{}-{nanos}", process::id()))
+}
+
+fn escaped_display_path(path: &Path) -> String {
+    path.display()
+        .to_string()
+        .chars()
+        .flat_map(|character| character.escape_default())
+        .collect()
 }
 
 fn write_test_object(path: &std::path::Path) {
@@ -238,14 +248,14 @@ fn cli_escapes_hostile_file_paths_in_errors() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("failed to parse executable"))
-        .stderr(predicate::str::contains(path.to_string_lossy().as_ref()));
+        .stderr(predicate::str::contains(escaped_display_path(&path)));
 
     fs::remove_file(path).unwrap();
 }
 
 #[test]
 fn cli_rejects_oversized_raw_hex_input() {
-    let oversized = "aa".repeat((16 * 1024) + 1);
+    let oversized = "aa".repeat((8 * 1024) + 1);
 
     let mut command = Command::cargo_bin("assembler").unwrap();
     command

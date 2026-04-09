@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt::{self, Display, Write as _},
     fs,
     path::{Path, PathBuf},
 };
@@ -11,417 +10,20 @@ use object::{
     Architecture as ObjectArchitecture, Endianness, Object, ObjectSection, ObjectSymbol,
     SectionKind, SymbolKind, SymbolSection,
 };
-use unicode_width::UnicodeWidthStr;
 
-const MAX_RENDERED_INSTRUCTION_BYTES: usize = 16;
-const BYTE_COLUMN_WIDTH: usize = MAX_RENDERED_INSTRUCTION_BYTES * 3;
 const MAX_INPUT_FILE_SIZE: u64 = 128 * 1024 * 1024;
-const MNEMONIC_COLUMN_WIDTH: usize = 12;
 const MAX_RAW_INPUT_BYTES: usize = 8 * 1024;
 
-#[derive(Clone, Debug)]
-pub struct DisasmRequest {
-    pub input: DisasmInput,
-    pub architecture: Option<Architecture>,
-    pub syntax: Syntax,
-    pub base_address: u64,
-    pub all_sections: bool,
-    pub sections: Vec<String>,
-    pub symbols: Vec<String>,
-    pub analyze: bool,
-}
-
-#[derive(Clone, Debug)]
-pub enum DisasmInput {
-    File(PathBuf),
-    RawHex(String),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Architecture {
-    X86,
-    X86_64,
-    Arm,
-    Thumb,
-    Aarch64,
-}
-
-impl Architecture {
-    fn from_object(architecture: ObjectArchitecture) -> Option<Self> {
-        match architecture {
-            ObjectArchitecture::I386 => Some(Self::X86),
-            ObjectArchitecture::X86_64 => Some(Self::X86_64),
-            ObjectArchitecture::Arm => Some(Self::Arm),
-            ObjectArchitecture::Aarch64 | ObjectArchitecture::Aarch64_Ilp32 => Some(Self::Aarch64),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn display_name(self) -> &'static str {
-        match self {
-            Self::X86 => "x86",
-            Self::X86_64 => "x86_64",
-            Self::Arm => "arm",
-            Self::Thumb => "thumb",
-            Self::Aarch64 => "aarch64",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Syntax {
-    Intel,
-    Att,
-}
-
-impl Syntax {
-    fn display_name(self) -> &'static str {
-        match self {
-            Self::Intel => "intel",
-            Self::Att => "att",
-        }
-    }
-}
+use crate::render::escape_for_terminal;
+pub(crate) use crate::types::{
+    Architecture, DisasmInput, DisasmRequest, DisassembledSection, DisassemblyReport, Instruction,
+    InstructionDetail, OperandAccess, OperandDetail, Syntax,
+};
 
 pub fn disassemble(request: DisasmRequest) -> Result<DisassemblyReport> {
     match &request.input {
         DisasmInput::File(path) => disassemble_file(path, &request),
         DisasmInput::RawHex(raw) => disassemble_raw(raw, &request),
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RenderOptions {
-    pretty: bool,
-    color_enabled: bool,
-}
-
-impl RenderOptions {
-    pub fn plain(color_enabled: bool) -> Self {
-        Self {
-            pretty: false,
-            color_enabled,
-        }
-    }
-
-    pub fn pretty(color_enabled: bool) -> Self {
-        Self {
-            pretty: true,
-            color_enabled,
-        }
-    }
-
-    pub(crate) fn is_pretty(&self) -> bool {
-        self.pretty
-    }
-
-    pub(crate) fn color_enabled(&self) -> bool {
-        self.color_enabled
-    }
-}
-
-#[derive(Debug)]
-pub struct DisassemblyReport {
-    pub(crate) target: String,
-    pub(crate) architecture: Architecture,
-    pub(crate) metadata: Vec<(String, String)>,
-    pub(crate) sections: Vec<DisassembledSection>,
-}
-
-impl DisassemblyReport {
-    pub fn render(&self, options: &RenderOptions) -> String {
-        if options.pretty {
-            self.render_pretty(options.color_enabled)
-        } else {
-            self.render_plain(options.color_enabled)
-        }
-    }
-
-    fn render_plain(&self, color_enabled: bool) -> String {
-        let mut output = String::with_capacity(self.estimated_plain_capacity());
-
-        let target = escape_for_terminal(&self.target);
-        let _ = writeln!(
-            output,
-            "{}: {}",
-            style_meta_key("target       ", color_enabled),
-            style_meta_value(&target, color_enabled)
-        );
-        for (key, value) in &self.metadata {
-            let padded_key = format!("{key:<12}");
-            let safe_value = escape_for_terminal(value);
-            let _ = writeln!(
-                output,
-                "{}: {}",
-                style_meta_key(&padded_key, color_enabled),
-                style_meta_value(&safe_value, color_enabled)
-            );
-        }
-
-        for section in &self.sections {
-            let _ = writeln!(output);
-            let safe_name = escape_for_terminal(&section.name);
-            let _ = writeln!(
-                output,
-                "[{}] {}={} {}={} {}={}",
-                style_section_name(&safe_name, color_enabled),
-                style_meta_key("addr", color_enabled),
-                style_address(&format_address(section.address), color_enabled),
-                style_meta_key("size", color_enabled),
-                style_number(&format!("{:#x}", section.size), color_enabled),
-                style_meta_key("instructions", color_enabled),
-                style_number(&section.instructions.len().to_string(), color_enabled)
-            );
-
-            let mut emitted_addresses = BTreeSet::new();
-            for instruction in &section.instructions {
-                if let Some(labels) = section.labels.get(&instruction.address) {
-                    for label in labels {
-                        let safe_label = escape_for_terminal(label);
-                        let _ = writeln!(
-                            output,
-                            "{} <{}>:",
-                            style_address(&format_address(instruction.address), color_enabled),
-                            style_label(&safe_label, color_enabled)
-                        );
-                    }
-                }
-
-                let _ = writeln!(output, "  {}", instruction.render_plain(color_enabled));
-                emitted_addresses.insert(instruction.address);
-            }
-
-            if section.instructions.is_empty() {
-                let _ = writeln!(output, "  <no instructions decoded>");
-            }
-
-            for (address, labels) in &section.labels {
-                if emitted_addresses.contains(address) {
-                    continue;
-                }
-
-                for label in labels {
-                    let safe_label = escape_for_terminal(label);
-                    let _ = writeln!(
-                        output,
-                        "{} <{}>:",
-                        style_address(&format_address(*address), color_enabled),
-                        style_label(&safe_label, color_enabled)
-                    );
-                }
-            }
-        }
-
-        output
-    }
-
-    fn render_pretty(&self, color_enabled: bool) -> String {
-        let mut output = String::with_capacity(self.estimated_pretty_capacity());
-
-        let mut header_lines = Vec::with_capacity(self.metadata.len() + 1);
-        header_lines.push(styled_key_value_line(
-            "target",
-            escape_for_terminal(&self.target),
-            color_enabled,
-        ));
-
-        for (key, value) in &self.metadata {
-            header_lines.push(styled_key_value_line(
-                key,
-                escape_for_terminal(value),
-                color_enabled,
-            ));
-        }
-
-        output.push_str(&render_box(
-            "disassembly",
-            &style_box_title("DISASSEMBLY", color_enabled),
-            &header_lines,
-        ));
-
-        for section in &self.sections {
-            output.push('\n');
-            output.push_str(&render_section_box(section, color_enabled));
-        }
-
-        output.push('\n');
-
-        output
-    }
-
-    fn estimated_plain_capacity(&self) -> usize {
-        let instruction_count: usize = self
-            .sections
-            .iter()
-            .map(|section| section.instructions.len())
-            .sum();
-        128 + (self.metadata.len() * 32) + (self.sections.len() * 64) + (instruction_count * 96)
-    }
-
-    fn estimated_pretty_capacity(&self) -> usize {
-        let instruction_count: usize = self
-            .sections
-            .iter()
-            .map(|section| section.instructions.len())
-            .sum();
-        256 + (self.metadata.len() * 48) + (self.sections.len() * 128) + (instruction_count * 128)
-    }
-}
-
-impl Display for DisassemblyReport {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.render(&RenderOptions::plain(false)))
-    }
-}
-
-#[derive(Debug)]
-struct StyledLine {
-    plain: String,
-    styled: String,
-}
-
-impl StyledLine {
-    fn plain(text: String) -> Self {
-        Self {
-            plain: text.clone(),
-            styled: text,
-        }
-    }
-
-    fn styled(plain: String, styled: String) -> Self {
-        Self { plain, styled }
-    }
-}
-
-#[derive(Debug)]
-pub(crate) struct DisassembledSection {
-    pub(crate) name: String,
-    pub(crate) address: u64,
-    pub(crate) size: u64,
-    pub(crate) labels: BTreeMap<u64, Vec<String>>,
-    pub(crate) instructions: Vec<Instruction>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OperandAccess {
-    ReadOnly,
-    WriteOnly,
-    ReadWrite,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum OperandDetail {
-    Register {
-        name: Option<String>,
-        access: Option<OperandAccess>,
-        size: u8,
-    },
-    Immediate {
-        value: i64,
-        size: u8,
-    },
-    Memory {
-        segment: Option<String>,
-        base: Option<String>,
-        index: Option<String>,
-        scale: i32,
-        disp: i64,
-        access: Option<OperandAccess>,
-        size: u8,
-    },
-    Invalid,
-}
-
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct InstructionDetail {
-    pub(crate) groups: Vec<String>,
-    pub(crate) operands: Vec<OperandDetail>,
-}
-
-#[derive(Debug)]
-pub(crate) struct Instruction {
-    pub(crate) address: u64,
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) mnemonic: String,
-    pub(crate) operands: String,
-    pub(crate) detail: Option<InstructionDetail>,
-}
-
-impl Instruction {
-    fn render_plain(&self, color_enabled: bool) -> String {
-        let mnemonic = escape_for_terminal(&self.mnemonic);
-        let operands = if self.operands.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", escape_for_terminal(&self.operands))
-        };
-
-        let address = format_address(self.address);
-        let bytes = self.render_bytes_field();
-        let mnemonic_padded = format!(
-            "{:<mnemonic_width$}",
-            mnemonic,
-            mnemonic_width = MNEMONIC_COLUMN_WIDTH
-        );
-
-        format!(
-            "{}  {}  {}{}",
-            style_address(&address, color_enabled),
-            style_bytes(&bytes, color_enabled),
-            style_mnemonic(&mnemonic_padded, &self.mnemonic, color_enabled),
-            style_operands(&operands, color_enabled)
-        )
-    }
-
-    fn render_pretty(&self, color_enabled: bool) -> StyledLine {
-        let address_plain = format_address(self.address);
-        let bytes_plain = self.render_bytes_field();
-        let safe_mnemonic = escape_for_terminal(&self.mnemonic);
-        let mnemonic_plain = format!(
-            "{:<mnemonic_width$}",
-            safe_mnemonic,
-            mnemonic_width = MNEMONIC_COLUMN_WIDTH
-        );
-        let operands_plain = if self.operands.is_empty() {
-            String::new()
-        } else {
-            format!(" {}", escape_for_terminal(&self.operands))
-        };
-
-        let plain = format!(
-            "{}  {}  {}{}",
-            address_plain, bytes_plain, mnemonic_plain, operands_plain
-        );
-        let styled = format!(
-            "{}  {}  {}{}",
-            style_address(&address_plain, color_enabled),
-            style_bytes(&bytes_plain, color_enabled),
-            style_mnemonic(&mnemonic_plain, &self.mnemonic, color_enabled),
-            style_operands(&operands_plain, color_enabled)
-        );
-
-        StyledLine::styled(plain, styled)
-    }
-
-    fn render_bytes_field(&self) -> String {
-        let mut bytes = String::with_capacity(BYTE_COLUMN_WIDTH + 2);
-        for (index, byte) in self
-            .bytes
-            .iter()
-            .take(MAX_RENDERED_INSTRUCTION_BYTES)
-            .enumerate()
-        {
-            if index > 0 {
-                bytes.push(' ');
-            }
-            let _ = write!(bytes, "{byte:02x}");
-        }
-
-        if self.bytes.len() > MAX_RENDERED_INSTRUCTION_BYTES {
-            bytes.push_str(" …");
-        }
-
-        format!("{:<width$}", bytes, width = BYTE_COLUMN_WIDTH)
     }
 }
 
@@ -461,7 +63,6 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
                 "architecture".into(),
                 architecture.display_name().to_string(),
             ),
-            ("syntax".into(), request.syntax.display_name().into()),
             (
                 "word-size".into(),
                 if file.is_64() { "64-bit" } else { "32-bit" }.into(),
@@ -469,6 +70,10 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
             ("entry".into(), format!("{:#x}", file.entry())),
             ("symbols".into(), request.symbols.join(", ")),
         ];
+
+        if architecture.supports_syntax_metadata() {
+            metadata.push(("syntax".into(), request.syntax.display_name().into()));
+        }
 
         if !request.sections.is_empty() {
             metadata.push(("filter".into(), request.sections.join(", ")));
@@ -533,13 +138,16 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
             "architecture".into(),
             architecture.display_name().to_string(),
         ),
-        ("syntax".into(), request.syntax.display_name().into()),
         (
             "word-size".into(),
             if file.is_64() { "64-bit" } else { "32-bit" }.into(),
         ),
         ("entry".into(), format!("{:#x}", file.entry())),
     ];
+
+    if architecture.supports_syntax_metadata() {
+        metadata.push(("syntax".into(), request.syntax.display_name().into()));
+    }
 
     if !request.sections.is_empty() {
         metadata.push(("filter".into(), request.sections.join(", ")));
@@ -594,15 +202,7 @@ fn disassemble_raw(raw_hex: &str, request: &DisasmRequest) -> Result<Disassembly
     Ok(DisassemblyReport {
         target: "<raw-hex>".into(),
         architecture,
-        metadata: vec![
-            ("architecture".into(), architecture.display_name().into()),
-            (
-                "base-address".into(),
-                format!("{:#x}", request.base_address),
-            ),
-            ("syntax".into(), request.syntax.display_name().into()),
-            ("byte-count".into(), bytes.len().to_string()),
-        ],
+        metadata: raw_metadata(architecture, request, bytes.len()),
         sections: vec![DisassembledSection {
             name: "raw".into(),
             address: request.base_address,
@@ -611,6 +211,27 @@ fn disassemble_raw(raw_hex: &str, request: &DisasmRequest) -> Result<Disassembly
             instructions,
         }],
     })
+}
+
+fn raw_metadata(
+    architecture: Architecture,
+    request: &DisasmRequest,
+    byte_count: usize,
+) -> Vec<(String, String)> {
+    let mut metadata = vec![
+        ("architecture".into(), architecture.display_name().into()),
+        (
+            "base-address".into(),
+            format!("{:#x}", request.base_address),
+        ),
+        ("byte-count".into(), byte_count.to_string()),
+    ];
+
+    if architecture.supports_syntax_metadata() {
+        metadata.push(("syntax".into(), request.syntax.display_name().into()));
+    }
+
+    metadata
 }
 
 fn build_capstone(architecture: Architecture, syntax: Syntax, detail: bool) -> Result<Capstone> {
@@ -937,516 +558,8 @@ fn disassemble_requested_symbols(
     Ok(sections)
 }
 
-fn render_section_box(section: &DisassembledSection, color_enabled: bool) -> String {
-    let safe_name = escape_for_terminal(&section.name);
-    let section_size = format!("{:#x}", section.size);
-    let mut lines = vec![StyledLine::styled(
-        format!(
-            "addr {}  •  size {}  •  instructions {}",
-            format_address(section.address),
-            section_size,
-            section.instructions.len()
-        ),
-        format!(
-            "{} {}  {}  {} {}  {}  {} {}",
-            style_meta_key("addr", color_enabled),
-            style_address(&format_address(section.address), color_enabled),
-            style_separator("•", color_enabled),
-            style_meta_key("size", color_enabled),
-            style_number(&section_size, color_enabled),
-            style_separator("•", color_enabled),
-            style_meta_key("instructions", color_enabled),
-            style_number(&section.instructions.len().to_string(), color_enabled)
-        ),
-    )];
-
-    if !section.instructions.is_empty() || !section.labels.is_empty() {
-        lines.push(StyledLine::plain(String::new()));
-    }
-
-    let mut emitted_addresses = BTreeSet::new();
-    for instruction in &section.instructions {
-        if let Some(labels) = section.labels.get(&instruction.address) {
-            for label in labels {
-                let safe_label = escape_for_terminal(label);
-                lines.push(StyledLine::styled(
-                    format!("• {}", safe_label),
-                    format!(
-                        "{} {}",
-                        style_separator("•", color_enabled),
-                        style_label(&safe_label, color_enabled)
-                    ),
-                ));
-            }
-        }
-
-        lines.push(instruction.render_pretty(color_enabled));
-        emitted_addresses.insert(instruction.address);
-    }
-
-    if section.instructions.is_empty() {
-        lines.push(StyledLine::styled(
-            "<no instructions decoded>".into(),
-            style_note("<no instructions decoded>", color_enabled),
-        ));
-    }
-
-    for (address, labels) in &section.labels {
-        if emitted_addresses.contains(address) {
-            continue;
-        }
-
-        for label in labels {
-            let safe_label = escape_for_terminal(label);
-            lines.push(StyledLine::styled(
-                format!("orphan label {address:#018x} {}", safe_label),
-                format!(
-                    "{} {} {} {}",
-                    style_note("orphan label", color_enabled),
-                    style_address(&format_address(*address), color_enabled),
-                    style_separator("→", color_enabled),
-                    style_label(&safe_label, color_enabled)
-                ),
-            ));
-        }
-    }
-
-    render_box(
-        &format!("section {safe_name}"),
-        &format!(
-            "{} {}",
-            style_box_title("SECTION", color_enabled),
-            style_section_name(&safe_name, color_enabled)
-        ),
-        &lines,
-    )
-}
-
-fn render_box(title_plain: &str, title_styled: &str, lines: &[StyledLine]) -> String {
-    let inner_width = lines
-        .iter()
-        .map(|line| visible_width(&line.plain))
-        .max()
-        .unwrap_or_default()
-        .max(visible_width(title_plain) + 1);
-
-    let title_width = visible_width(title_plain);
-    let fill = inner_width.saturating_sub(title_width);
-
-    let mut output = String::new();
-    let _ = writeln!(output, "╭─ {}{}╮", title_styled, "─".repeat(fill));
-    for line in lines {
-        let padding = inner_width.saturating_sub(visible_width(&line.plain));
-        let _ = writeln!(output, "│ {}{} │", line.styled, " ".repeat(padding));
-    }
-    let _ = write!(output, "╰{}╯", "─".repeat(inner_width + 2));
-    output
-}
-
-fn styled_key_value_line(key: &str, value: String, color_enabled: bool) -> StyledLine {
-    let padded_key = pad_display_right(key, 12);
-    let plain = format!("{} {}", padded_key, value);
-    let styled = format!(
-        "{} {}",
-        style_meta_key(&padded_key, color_enabled),
-        style_meta_value(&value, color_enabled)
-    );
-
-    StyledLine::styled(plain, styled)
-}
-
-fn format_address(address: u64) -> String {
-    format!("{address:#018x}")
-}
-
-fn visible_width(value: &str) -> usize {
-    UnicodeWidthStr::width(value)
-}
-
-fn pad_display_right(value: &str, width: usize) -> String {
-    let current_width = visible_width(value);
-    if current_width >= width {
-        value.to_owned()
-    } else {
-        format!("{}{}", value, " ".repeat(width - current_width))
-    }
-}
-
-fn style_text(text: &str, color_enabled: bool, codes: &[&str]) -> String {
-    if color_enabled {
-        format!("\x1b[{}m{}\x1b[0m", codes.join(";"), text)
-    } else {
-        text.to_owned()
-    }
-}
-
-fn style_box_title(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "97"])
-}
-
-fn style_section_name(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "95"])
-}
-
-fn style_meta_key(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "90"])
-}
-
-fn style_meta_value(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["97"])
-}
-
-fn style_separator(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["90"])
-}
-
-fn style_note(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["3", "90"])
-}
-
-fn style_label(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "93"])
-}
-
-fn style_address(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "96"])
-}
-
-fn style_bytes(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["90"])
-}
-
-fn style_number(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["95"])
-}
-
-fn style_mnemonic(field: &str, mnemonic: &str, color_enabled: bool) -> String {
-    let category = classify_mnemonic(mnemonic);
-    let codes = match category {
-        MnemonicCategory::ControlFlow => &["1", "91"][..],
-        MnemonicCategory::Move => &["1", "94"][..],
-        MnemonicCategory::Stack => &["1", "93"][..],
-        MnemonicCategory::Compare => &["1", "95"][..],
-        MnemonicCategory::Arithmetic => &["1", "92"][..],
-        MnemonicCategory::Logic => &["32"][..],
-        MnemonicCategory::Nop => &["3", "90"][..],
-        MnemonicCategory::Other => &["1", "97"][..],
-    };
-    style_text(field, color_enabled, codes)
-}
-
-fn style_operands(operands: &str, color_enabled: bool) -> String {
-    debug_assert!(
-        operands.is_ascii(),
-        "escaped operand rendering expects ASCII-only input"
-    );
-
-    let mut output = String::with_capacity(operands.len() + 16);
-    let bytes = operands.as_bytes();
-    let mut index = 0;
-
-    while index < bytes.len() {
-        let current = bytes[index] as char;
-
-        if current.is_whitespace() {
-            output.push(current);
-            index += 1;
-            continue;
-        }
-
-        if let Some(end) = read_special_operand_token(bytes, index) {
-            let token = &operands[index..end];
-            output.push_str(&style_operand_token(token, color_enabled));
-            index = end;
-            continue;
-        }
-
-        if is_operand_separator_byte(bytes[index]) {
-            output.push_str(&style_separator(&current.to_string(), color_enabled));
-            index += 1;
-            continue;
-        }
-
-        let start = index;
-        while index < bytes.len()
-            && !bytes[index].is_ascii_whitespace()
-            && !is_operand_separator_byte(bytes[index])
-        {
-            index += 1;
-        }
-
-        let token = &operands[start..index];
-        output.push_str(&style_operand_token(token, color_enabled));
-    }
-
-    output
-}
-
-fn read_special_operand_token(bytes: &[u8], start: usize) -> Option<usize> {
-    let current = *bytes.get(start)? as char;
-    let next = bytes.get(start + 1).copied().map(char::from);
-
-    if current == '\\' {
-        return read_escaped_operand_token(bytes, start);
-    }
-
-    if matches!(current, '$' | '#') && next.is_some_and(is_signed_numeric_start) {
-        return Some(read_numeric_body_end(bytes, start + 1));
-    }
-
-    if is_signed_numeric_start(current)
-        && (start == 0 || previous_allows_numeric_sign(bytes[start - 1] as char))
-    {
-        return Some(read_numeric_body_end(bytes, start));
-    }
-
-    None
-}
-
-fn read_escaped_operand_token(bytes: &[u8], start: usize) -> Option<usize> {
-    let next = bytes.get(start + 1).copied().map(char::from)?;
-
-    if matches!(next, 'n' | 'r' | 't' | '\\' | '0') {
-        return Some((start + 2).min(bytes.len()));
-    }
-
-    if next == 'u' && bytes.get(start + 2) == Some(&b'{') {
-        let mut index = start + 3;
-        while index < bytes.len() {
-            if bytes[index] == b'}' {
-                return Some(index + 1);
-            }
-            index += 1;
-        }
-    }
-
-    None
-}
-
-fn read_numeric_body_end(bytes: &[u8], start: usize) -> usize {
-    let mut index = start;
-
-    if bytes.get(index) == Some(&b'-') {
-        index += 1;
-    }
-
-    while index < bytes.len() && is_numeric_body_char(bytes[index] as char) {
-        index += 1;
-    }
-
-    index
-}
-
-fn is_signed_numeric_start(character: char) -> bool {
-    character == '-' || character.is_ascii_digit()
-}
-
-fn previous_allows_numeric_sign(character: char) -> bool {
-    character.is_whitespace() || matches!(character, ',' | '[' | '(' | '{' | '+' | '=')
-}
-
-fn is_numeric_body_char(character: char) -> bool {
-    character.is_ascii_hexdigit() || matches!(character, 'x' | 'X')
-}
-
-fn is_operand_separator(character: char) -> bool {
-    matches!(
-        character,
-        ',' | '[' | ']' | '(' | ')' | '{' | '}' | '+' | '-' | '*' | '<' | '>' | ':' | '!' | '='
-    )
-}
-
-fn is_operand_separator_byte(byte: u8) -> bool {
-    is_operand_separator(byte as char)
-}
-
-fn style_operand_token(token: &str, color_enabled: bool) -> String {
-    if token.is_empty() {
-        return String::new();
-    }
-
-    let register_like = token
-        .trim_start_matches('%')
-        .trim_end_matches(',')
-        .to_ascii_lowercase();
-    let size_like = token
-        .trim_start_matches(['#', '$', '%'])
-        .trim_end_matches(',')
-        .to_ascii_lowercase();
-
-    if is_numeric_token(token) {
-        style_number(token, color_enabled)
-    } else if is_register_token(&register_like) {
-        style_text(token, color_enabled, &["1", "96"])
-    } else if is_size_token(&size_like) {
-        style_text(token, color_enabled, &["1", "94"])
-    } else {
-        style_text(token, color_enabled, &["97"])
-    }
-}
-
-fn is_numeric_token(token: &str) -> bool {
-    let trimmed = token
-        .trim_start_matches(['#', '$'])
-        .trim_start_matches(['-', '+']);
-    if trimmed.is_empty() {
-        return false;
-    }
-
-    if let Some(hex) = trimmed
-        .strip_prefix("0x")
-        .or_else(|| trimmed.strip_prefix("0X"))
-    {
-        return !hex.is_empty() && hex.chars().all(|character| character.is_ascii_hexdigit());
-    }
-
-    trimmed.chars().all(|character| character.is_ascii_digit())
-}
-
-fn is_register_token(token: &str) -> bool {
-    matches!(
-        token,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rsi"
-            | "rdi"
-            | "rbp"
-            | "rsp"
-            | "rip"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "esi"
-            | "edi"
-            | "ebp"
-            | "esp"
-            | "ax"
-            | "bx"
-            | "cx"
-            | "dx"
-            | "si"
-            | "di"
-            | "bp"
-            | "sp"
-            | "al"
-            | "ah"
-            | "bl"
-            | "bh"
-            | "cl"
-            | "ch"
-            | "dl"
-            | "dh"
-            | "cs"
-            | "ds"
-            | "es"
-            | "fs"
-            | "gs"
-            | "ss"
-            | "pc"
-            | "lr"
-            | "fp"
-            | "ip"
-            | "xzr"
-            | "wzr"
-            | "nzcv"
-    ) || token.strip_prefix('r').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix('x').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix('w').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix('v').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix("xmm").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix("ymm").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix("zmm").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    })
-}
-
-fn is_size_token(token: &str) -> bool {
-    matches!(
-        token,
-        "byte" | "word" | "dword" | "qword" | "xword" | "xmmword" | "ymmword" | "zmmword" | "ptr"
-    )
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum MnemonicCategory {
-    ControlFlow,
-    Move,
-    Stack,
-    Compare,
-    Arithmetic,
-    Logic,
-    Nop,
-    Other,
-}
-
-fn classify_mnemonic(mnemonic: &str) -> MnemonicCategory {
-    let mnemonic = mnemonic.trim().to_ascii_lowercase();
-
-    if mnemonic == "nop" {
-        MnemonicCategory::Nop
-    } else if mnemonic.starts_with('j')
-        || matches!(
-            mnemonic.as_str(),
-            "call" | "ret" | "retq" | "b" | "bl" | "blr" | "br"
-        )
-        || mnemonic.starts_with("cb")
-        || mnemonic.starts_with("tb")
-        || mnemonic.starts_with("b.")
-    {
-        MnemonicCategory::ControlFlow
-    } else if mnemonic.starts_with("push")
-        || mnemonic.starts_with("pop")
-        || mnemonic == "enter"
-        || mnemonic == "leave"
-    {
-        MnemonicCategory::Stack
-    } else if mnemonic.starts_with("mov")
-        || mnemonic == "lea"
-        || mnemonic.starts_with("ldr")
-        || mnemonic.starts_with("str")
-        || mnemonic.starts_with("ldp")
-        || mnemonic.starts_with("stp")
-        || mnemonic.starts_with("adr")
-    {
-        MnemonicCategory::Move
-    } else if mnemonic.starts_with("cmp") || mnemonic == "test" || mnemonic == "tst" {
-        MnemonicCategory::Compare
-    } else if mnemonic.starts_with("add")
-        || mnemonic.starts_with("sub")
-        || mnemonic.starts_with("mul")
-        || mnemonic.starts_with("imul")
-        || mnemonic.starts_with("div")
-        || mnemonic.starts_with("idiv")
-        || mnemonic.starts_with("inc")
-        || mnemonic.starts_with("dec")
-        || mnemonic.starts_with("neg")
-    {
-        MnemonicCategory::Arithmetic
-    } else if mnemonic.starts_with("and")
-        || mnemonic.starts_with("or")
-        || mnemonic.starts_with("xor")
-        || mnemonic.starts_with("sh")
-        || mnemonic.starts_with("sa")
-        || mnemonic.starts_with("ro")
-        || mnemonic.starts_with("not")
-    {
-        MnemonicCategory::Logic
-    } else {
-        MnemonicCategory::Other
-    }
-}
-
 fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
-    let mut nybbles = Vec::with_capacity(raw.len());
+    let mut nybbles = Vec::with_capacity((MAX_RAW_INPUT_BYTES * 2).min(raw.len()));
     for byte in raw.bytes() {
         match byte {
             b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F' => {
@@ -1490,12 +603,6 @@ fn decode_hex_nybble(byte: u8) -> Option<u8> {
     }
 }
 
-fn escape_for_terminal(raw: &str) -> String {
-    raw.chars()
-        .flat_map(|character| character.escape_default())
-        .collect()
-}
-
 fn escaped_path(path: &Path) -> String {
     escape_for_terminal(&path.display().to_string())
 }
@@ -1511,10 +618,11 @@ fn format_endianness(endianness: Endianness) -> &'static str {
 mod tests {
     use super::{
         Architecture, DisasmInput, DisasmRequest, DisassembledSection, DisassemblyReport,
-        Instruction, MAX_RAW_INPUT_BYTES, RenderOptions, Syntax, disassemble, escape_for_terminal,
-        parse_hex_bytes, render_box, render_section_box, should_disassemble_section,
-        style_operands,
+        Instruction, MAX_RAW_INPUT_BYTES, Syntax, disassemble, escape_for_terminal,
+        parse_hex_bytes, should_disassemble_section,
     };
+    use crate::render::{render_box, render_section_box, style_operands, styled_key_value_line};
+    use crate::types::RenderOptions;
     use std::collections::BTreeMap;
     use std::panic;
 
@@ -1768,9 +876,9 @@ mod tests {
             "disassembly",
             "DISASSEMBLY",
             &[
-                super::styled_key_value_line("target", "<raw-hex>".into(), false),
-                super::styled_key_value_line("architecture", "x86_64".into(), false),
-                super::styled_key_value_line("byte-count", "6".into(), false),
+                styled_key_value_line("target", "<raw-hex>".into(), false),
+                styled_key_value_line("architecture", "x86_64".into(), false),
+                styled_key_value_line("byte-count", "6".into(), false),
             ],
         );
 
@@ -1917,10 +1025,14 @@ mod tests {
 
     #[test]
     fn style_operands_preserves_register_families() {
-        let styled = style_operands(" %xmm1, x2, wzr, rax ", false);
+        let styled = style_operands(" %xmm1, x2, wzr, wsp, fpcr, fpsr, daif, rax ", false);
         assert!(styled.contains("%xmm1"));
         assert!(styled.contains("x2"));
         assert!(styled.contains("wzr"));
+        assert!(styled.contains("wsp"));
+        assert!(styled.contains("fpcr"));
+        assert!(styled.contains("fpsr"));
+        assert!(styled.contains("daif"));
         assert!(styled.contains("rax"));
     }
 

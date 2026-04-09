@@ -1,22 +1,27 @@
-use std::fmt::Write as _;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
+};
 
-use unicode_width::UnicodeWidthStr;
+use serde::Serialize;
 
-use crate::disasm::{
+use crate::render::{
+    StyledLine, escape_for_terminal, format_address, render_box, style_address, style_box_title,
+    style_meta_key, style_meta_value, style_note, style_text,
+};
+use crate::types::{
     Architecture, DisassembledSection, DisassemblyReport, Instruction, OperandAccess,
     OperandDetail, RenderOptions,
 };
 
-const FRAME_SETUP_SCAN_LIMIT: usize = 16;
-
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AnalysisReport {
     architecture: Architecture,
     findings: Vec<Finding>,
     notes: Vec<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct Finding {
     pub kind: FindingKind,
     pub severity: Severity,
@@ -25,7 +30,7 @@ pub struct Finding {
     pub rationale: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub enum FindingKind {
     PotentialStackBufferWriteRisk,
     PossibleOutOfBoundsLocalWrite,
@@ -35,7 +40,7 @@ pub enum FindingKind {
     IndirectWriteRisk,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub enum Severity {
     Low,
     Medium,
@@ -64,6 +69,18 @@ struct LoopEvidence {
     target: u64,
     counter_register: Option<String>,
     bound: Option<i64>,
+}
+
+#[derive(Clone, Debug)]
+struct BasicBlock {
+    start_index: usize,
+    end_index: usize,
+    successors: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ControlFlowGraph {
+    blocks: Vec<BasicBlock>,
 }
 
 #[derive(Clone, Debug)]
@@ -121,6 +138,10 @@ impl AnalysisReport {
         } else {
             self.render_plain(options.color_enabled())
         }
+    }
+
+    pub fn has_findings(&self) -> bool {
+        !self.findings.is_empty()
     }
 
     fn render_plain(&self, color_enabled: bool) -> String {
@@ -254,6 +275,8 @@ fn analyze_instruction(
     frame: FrameState,
     findings: &mut Vec<Finding>,
 ) {
+    let section_name = &section.name;
+
     for memory in memory_writes(instruction) {
         if let Some(reason) = unsafe_frame_write_reason(frame, &memory) {
             push_finding(
@@ -261,7 +284,7 @@ fn analyze_instruction(
                 Finding {
                     kind: FindingKind::UnsafeStackFrameWrite,
                     severity: Severity::Medium,
-                    section: section.name.clone(),
+                    section: section_name.clone(),
                     address: instruction.address,
                     rationale: reason,
                 },
@@ -274,7 +297,7 @@ fn analyze_instruction(
                 Finding {
                     kind: FindingKind::PossibleOutOfBoundsLocalWrite,
                     severity: Severity::High,
-                    section: section.name.clone(),
+                    section: section_name.clone(),
                     address: instruction.address,
                     rationale: reason,
                 },
@@ -287,7 +310,7 @@ fn analyze_instruction(
                 Finding {
                     kind: FindingKind::StackPointerFramePointerAnomaly,
                     severity: Severity::Medium,
-                    section: section.name.clone(),
+                    section: section_name.clone(),
                     address: instruction.address,
                     rationale: reason,
                 },
@@ -300,7 +323,7 @@ fn analyze_instruction(
                 Finding {
                     kind: FindingKind::IndirectWriteRisk,
                     severity: Severity::Low,
-                    section: section.name.clone(),
+                    section: section_name.clone(),
                     address: instruction.address,
                     rationale: format!(
                         "Instruction performs a memory write through computed pointer base {}{}; local bounds are not recoverable from this disassembly alone.",
@@ -322,6 +345,7 @@ fn analyze_loop(
     loop_evidence: &LoopEvidence,
     findings: &mut Vec<Finding>,
 ) {
+    let section_name = &section.name;
     let body = &section.instructions[loop_evidence.start..=loop_evidence.end];
     let mut saw_suspicious_copy = false;
 
@@ -341,7 +365,7 @@ fn analyze_loop(
                                 Finding {
                                     kind: FindingKind::PossibleOutOfBoundsLocalWrite,
                                     severity: Severity::High,
-                                    section: section.name.clone(),
+                                    section: section_name.clone(),
                                     address: instruction.address,
                                     rationale: format!(
                                         "Loop writes stack-local memory through index register {index}, and the same register is compared against immediate bound {bound}; that bound exceeds the inferred local capacity from displacement {:+#x}, which is only {capacity} bytes.",
@@ -354,7 +378,7 @@ fn analyze_loop(
                                 Finding {
                                     kind: FindingKind::PotentialStackBufferWriteRisk,
                                     severity: Severity::High,
-                                    section: section.name.clone(),
+                                    section: section_name.clone(),
                                     address: instruction.address,
                                     rationale: format!(
                                         "A backward branch to {:#x} drives repeated indexed writes into stack-local memory, and the compared progression register exceeds the inferred local capacity.",
@@ -369,7 +393,7 @@ fn analyze_loop(
                             Finding {
                                 kind: FindingKind::PotentialStackBufferWriteRisk,
                                 severity: Severity::Medium,
-                                section: section.name.clone(),
+                                section: section_name.clone(),
                                 address: instruction.address,
                                 rationale: format!(
                                     "Backward branch to {:#x} repeatedly writes indexed stack-local memory via {index}, but no local bound tied to the destination size was recovered.",
@@ -391,7 +415,7 @@ fn analyze_loop(
             Finding {
                 kind: FindingKind::SuspiciousCopyLoop,
                 severity: Severity::Medium,
-                section: section.name.clone(),
+                section: section_name.clone(),
                 address: section.instructions[loop_evidence.end].address,
                 rationale: match (&loop_evidence.counter_register, loop_evidence.bound) {
                     (Some(register), Some(bound))
@@ -418,7 +442,11 @@ fn analyze_loop(
 fn detect_frame_state(section: &DisassembledSection) -> FrameState {
     let mut state = FrameState::default();
 
-    for instruction in section.instructions.iter().take(FRAME_SETUP_SCAN_LIMIT) {
+    for instruction in &section.instructions {
+        if is_frame_scan_boundary(instruction) {
+            break;
+        }
+
         let mnemonic = instruction.mnemonic.to_ascii_lowercase();
         let operands = instruction
             .detail
@@ -484,39 +512,167 @@ fn detect_frame_state(section: &DisassembledSection) -> FrameState {
 }
 
 fn detect_loops(section: &DisassembledSection) -> Vec<LoopEvidence> {
-    let mut loops = Vec::new();
+    let cfg = build_control_flow_graph(section);
+    let mut loops: Vec<LoopEvidence> = Vec::new();
 
-    for (index, instruction) in section.instructions.iter().enumerate() {
-        let Some(target) = jump_target(instruction) else {
-            continue;
-        };
-        if target >= instruction.address {
-            continue;
+    for block in &cfg.blocks {
+        for &successor_index in &block.successors {
+            let successor = &cfg.blocks[successor_index];
+            if successor.start_index > block.start_index {
+                continue;
+            }
+
+            let compare = section.instructions[successor.start_index..=block.end_index]
+                .iter()
+                .rev()
+                .find_map(compare_register_bound);
+
+            let candidate = LoopEvidence {
+                start: successor.start_index,
+                end: block.end_index,
+                target: section.instructions[successor.start_index].address,
+                counter_register: compare.as_ref().map(|(register, _)| register.clone()),
+                bound: compare.map(|(_, bound)| bound),
+            };
+
+            if loops.iter().any(|existing| {
+                existing.start == candidate.start
+                    && existing.end == candidate.end
+                    && existing.target == candidate.target
+            }) {
+                continue;
+            }
+
+            loops.push(candidate);
         }
-
-        let Some(start) = section
-            .instructions
-            .iter()
-            .position(|candidate| candidate.address >= target)
-        else {
-            continue;
-        };
-
-        let compare = section.instructions[start..=index]
-            .iter()
-            .rev()
-            .find_map(compare_register_bound);
-
-        loops.push(LoopEvidence {
-            start,
-            end: index,
-            target,
-            counter_register: compare.as_ref().map(|(register, _)| register.clone()),
-            bound: compare.map(|(_, bound)| bound),
-        });
     }
 
     loops
+}
+
+fn build_control_flow_graph(section: &DisassembledSection) -> ControlFlowGraph {
+    if section.instructions.is_empty() {
+        return ControlFlowGraph::default();
+    }
+
+    let address_to_instruction_index = section
+        .instructions
+        .iter()
+        .enumerate()
+        .map(|(index, instruction)| (instruction.address, index))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut leader_indices = BTreeSet::from([0usize]);
+    for (index, instruction) in section.instructions.iter().enumerate() {
+        if let Some(target_index) = jump_target(instruction)
+            .and_then(|target| address_to_instruction_index.get(&target).copied())
+        {
+            leader_indices.insert(target_index);
+        }
+
+        if is_basic_block_boundary(instruction) && index + 1 < section.instructions.len() {
+            leader_indices.insert(index + 1);
+        }
+    }
+
+    let leader_indices = leader_indices.into_iter().collect::<Vec<_>>();
+    let leader_to_block = leader_indices
+        .iter()
+        .enumerate()
+        .map(|(block_index, &leader_index)| (leader_index, block_index))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut blocks = Vec::with_capacity(leader_indices.len());
+    for (position, &start_index) in leader_indices.iter().enumerate() {
+        let next_start = leader_indices.get(position + 1).copied();
+        let end_index = next_start
+            .map(|next| next.saturating_sub(1))
+            .unwrap_or_else(|| section.instructions.len() - 1);
+        let next_block_index = next_start.and_then(|next| leader_to_block.get(&next).copied());
+
+        blocks.push(BasicBlock {
+            start_index,
+            end_index,
+            successors: basic_block_successors(
+                section,
+                end_index,
+                next_block_index,
+                &address_to_instruction_index,
+                &leader_to_block,
+            ),
+        });
+    }
+
+    ControlFlowGraph { blocks }
+}
+
+fn basic_block_successors(
+    section: &DisassembledSection,
+    end_index: usize,
+    next_block_index: Option<usize>,
+    address_to_instruction_index: &BTreeMap<u64, usize>,
+    leader_to_block: &BTreeMap<usize, usize>,
+) -> Vec<usize> {
+    let instruction = &section.instructions[end_index];
+    let mut successors = Vec::new();
+
+    if instruction_has_group(instruction, "jump") {
+        if let Some(target_block_index) = jump_target(instruction)
+            .and_then(|target| address_to_instruction_index.get(&target).copied())
+            .and_then(|target_index| leader_to_block.get(&target_index).copied())
+        {
+            successors.push(target_block_index);
+        }
+
+        if !is_unconditional_jump(instruction)
+            && let Some(next_block_index) = next_block_index
+        {
+            successors.push(next_block_index);
+        }
+
+        return successors;
+    }
+
+    if is_return_instruction(instruction) {
+        return successors;
+    }
+
+    if let Some(next_block_index) = next_block_index {
+        successors.push(next_block_index);
+    }
+
+    successors
+}
+
+fn is_basic_block_boundary(instruction: &Instruction) -> bool {
+    instruction_has_group(instruction, "jump")
+        || instruction_has_group(instruction, "call")
+        || is_return_instruction(instruction)
+}
+
+fn is_frame_scan_boundary(instruction: &Instruction) -> bool {
+    instruction_has_group(instruction, "call")
+        || jump_target(instruction).is_some_and(|target| target < instruction.address)
+}
+
+fn instruction_has_group(instruction: &Instruction, group_name: &str) -> bool {
+    instruction
+        .detail
+        .as_ref()
+        .is_some_and(|detail| detail.groups.iter().any(|group| group == group_name))
+}
+
+fn is_unconditional_jump(instruction: &Instruction) -> bool {
+    instruction.mnemonic.eq_ignore_ascii_case("jmp")
+        || instruction.mnemonic.eq_ignore_ascii_case("jmpq")
+        || instruction.mnemonic.eq_ignore_ascii_case("ljmp")
+        || instruction.mnemonic.eq_ignore_ascii_case("b")
+}
+
+fn is_return_instruction(instruction: &Instruction) -> bool {
+    instruction.mnemonic.eq_ignore_ascii_case("ret")
+        || instruction.mnemonic.eq_ignore_ascii_case("retq")
+        || instruction.mnemonic.eq_ignore_ascii_case("iret")
 }
 
 fn compare_register_bound(instruction: &Instruction) -> Option<(String, i64)> {
@@ -700,10 +856,12 @@ fn is_stack_base(base: Option<&str>) -> bool {
 }
 
 fn push_finding(findings: &mut Vec<Finding>, finding: Finding) {
-    if findings
-        .iter()
-        .any(|existing| existing.kind == finding.kind && existing.address == finding.address)
-    {
+    if findings.iter().any(|existing| {
+        existing.kind == finding.kind
+            && existing.address == finding.address
+            && existing.section == finding.section
+            && existing.rationale == finding.rationale
+    }) {
         return;
     }
     findings.push(finding);
@@ -732,82 +890,6 @@ impl Severity {
     }
 }
 
-#[derive(Debug)]
-struct StyledLine {
-    plain: String,
-    styled: String,
-}
-
-impl StyledLine {
-    fn plain(text: String) -> Self {
-        Self {
-            plain: text.clone(),
-            styled: text,
-        }
-    }
-
-    fn styled(plain: String, styled: String) -> Self {
-        Self { plain, styled }
-    }
-}
-
-fn render_box(title_plain: &str, title_styled: &str, lines: &[StyledLine]) -> String {
-    let inner_width = lines
-        .iter()
-        .map(|line| UnicodeWidthStr::width(line.plain.as_str()))
-        .max()
-        .unwrap_or_default()
-        .max(UnicodeWidthStr::width(title_plain) + 1);
-
-    let mut output = String::new();
-    let fill = inner_width.saturating_sub(UnicodeWidthStr::width(title_plain));
-    let _ = writeln!(output, "╭─ {}{}╮", title_styled, "─".repeat(fill));
-    for line in lines {
-        let padding = inner_width.saturating_sub(UnicodeWidthStr::width(line.plain.as_str()));
-        let _ = writeln!(output, "│ {}{} │", line.styled, " ".repeat(padding));
-    }
-    let _ = write!(output, "╰{}╯", "─".repeat(inner_width + 2));
-    output
-}
-
-fn escape_for_terminal(raw: &str) -> String {
-    raw.chars()
-        .flat_map(|character| character.escape_default())
-        .collect()
-}
-
-fn format_address(address: u64) -> String {
-    format!("{address:#018x}")
-}
-
-fn style_text(text: &str, color_enabled: bool, codes: &[&str]) -> String {
-    if color_enabled {
-        format!("\x1b[{}m{}\x1b[0m", codes.join(";"), text)
-    } else {
-        text.to_owned()
-    }
-}
-
-fn style_box_title(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "97"])
-}
-
-fn style_meta_key(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "90"])
-}
-
-fn style_meta_value(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["97"])
-}
-
-fn style_note(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["3", "90"])
-}
-
-fn style_address(text: &str, color_enabled: bool) -> String {
-    style_text(text, color_enabled, &["1", "96"])
-}
-
 fn style_kind(text: &str, color_enabled: bool) -> String {
     style_text(text, color_enabled, &["1", "95"])
 }
@@ -823,11 +905,9 @@ fn style_severity(text: &str, severity: Severity, color_enabled: bool) -> String
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        AnalysisReport, FindingKind, Severity, analyze, escape_for_terminal, render_box,
-        style_box_title,
-    };
-    use crate::disasm::{
+    use super::{AnalysisReport, FindingKind, Severity, analyze, push_finding};
+    use crate::render::{StyledLine, escape_for_terminal, render_box, style_box_title};
+    use crate::types::{
         Architecture, DisassembledSection, DisassemblyReport, Instruction, InstructionDetail,
         OperandAccess, OperandDetail, RenderOptions,
     };
@@ -1174,6 +1254,107 @@ mod tests {
     }
 
     #[test]
+    fn delayed_frame_setup_before_first_loop_is_still_detected() {
+        let report = report_with_instructions(vec![
+            instruction(
+                0x1000,
+                "mov",
+                "rdi, rsi",
+                InstructionDetail {
+                    groups: vec![],
+                    operands: vec![reg_write("rdi"), reg("rsi")],
+                },
+            ),
+            instruction(
+                0x1003,
+                "mov",
+                "r8, r9",
+                InstructionDetail {
+                    groups: vec![],
+                    operands: vec![reg_write("r8"), reg("r9")],
+                },
+            ),
+            instruction(
+                0x1006,
+                "mov",
+                "rbp, rsp",
+                InstructionDetail {
+                    groups: vec![],
+                    operands: vec![reg_write("rbp"), reg("rsp")],
+                },
+            ),
+            instruction(
+                0x1009,
+                "sub",
+                "rsp, 0x20",
+                InstructionDetail {
+                    groups: vec![],
+                    operands: vec![reg_write("rsp"), imm(0x20)],
+                },
+            ),
+            instruction(
+                0x100d,
+                "mov",
+                "byte ptr [rbp + rax - 0x10], 0x41",
+                InstructionDetail {
+                    groups: vec![],
+                    operands: vec![mem_write("rbp", Some("rax"), -0x10, 1), imm(0x41)],
+                },
+            ),
+            instruction(
+                0x1012,
+                "cmp",
+                "rax, 0x40",
+                InstructionDetail {
+                    groups: vec![],
+                    operands: vec![reg("rax"), imm(0x40)],
+                },
+            ),
+            instruction(
+                0x1016,
+                "jne",
+                "0x100d",
+                InstructionDetail {
+                    groups: vec!["jump".into(), "branch_relative".into()],
+                    operands: vec![imm(0x100d)],
+                },
+            ),
+        ]);
+
+        let analysis = analyze(&report);
+        assert!(analysis.findings.iter().any(|finding| {
+            finding.kind == FindingKind::PotentialStackBufferWriteRisk && finding.address == 0x100d
+        }));
+    }
+
+    #[test]
+    fn keeps_distinct_findings_with_same_kind_and_address_when_rationales_differ() {
+        let mut findings = Vec::new();
+        push_finding(
+            &mut findings,
+            super::Finding {
+                kind: FindingKind::IndirectWriteRisk,
+                severity: Severity::Low,
+                section: ".text".into(),
+                address: 0x1000,
+                rationale: "first rationale".into(),
+            },
+        );
+        push_finding(
+            &mut findings,
+            super::Finding {
+                kind: FindingKind::IndirectWriteRisk,
+                severity: Severity::Low,
+                section: ".text".into(),
+                address: 0x1000,
+                rationale: "second rationale".into(),
+            },
+        );
+
+        assert_eq!(findings.len(), 2);
+    }
+
+    #[test]
     fn pretty_analysis_render_uses_box_layout() {
         let analysis = AnalysisReport {
             architecture: Architecture::X86_64,
@@ -1199,7 +1380,7 @@ mod tests {
         let rendered = render_box(
             "analysis",
             &style_box_title("ANALYSIS", false),
-            &[super::StyledLine::plain("note hello".into())],
+            &[StyledLine::plain("note hello".into())],
         );
         assert!(rendered.contains("ANALYSIS"));
     }

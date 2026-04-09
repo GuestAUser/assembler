@@ -18,6 +18,12 @@
   <img src="cape2.png" alt="assembler plain output" width="100%" />
 </p>
 
+### Analysis output
+
+<p align="center">
+  <img src="cape3.png" alt="assembler analysis output" width="100%" />
+</p>
+
 ## Why I built this
 
 I wanted a disassembler that feels direct: point it at raw hex, an object or executable, or one specific symbol, and get readable assembly immediately. `assembler` is the tool I built for that workflow. It is focused, scriptable, careful about terminal behavior, and clean enough to use both interactively and in captured output.
@@ -29,6 +35,7 @@ I wanted a disassembler that feels direct: point it at raw hex, an object or exe
 - Focuses output with `--symbol` and `--section`
 - Uses Intel / AMD-style syntax by default for x86 and x86_64
 - Supports optional AT&T syntax with `--syntax att`
+- Supports conservative semantic analysis with `--analyze`
 - Renders both pretty and plain output
 - Supports ANSI coloring in both pretty and plain modes
 - Falls back to plain output automatically for captured / non-TTY output
@@ -66,6 +73,12 @@ cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render plain --color 
 cargo run -- ./target/debug/assembler --symbol main
 ```
 
+### Add conservative analysis to disassembly output
+
+```bash
+cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --analyze
+```
+
 ### Restrict output to selected sections
 
 ```bash
@@ -88,7 +101,15 @@ Then disassemble only the password check:
 cargo run -- examples/password-login/secret_login --symbol check_password --render pretty --color never
 ```
 
+Or run the conservative analyzer on that symbol:
+
+```bash
+cargo run -- examples/password-login/secret_login --symbol check_password --analyze --render plain --color never
+```
+
 The output shows the password logic as immediate byte comparisons inside `check_password`. In other words, the secret falls straight out of the disassembly. That is exactly the kind of failure this tool makes obvious.
+
+With `--analyze`, this example should stay conservative and report no supported memory-safety findings, because the function performs byte-by-byte comparisons rather than unsafe copying.
 
 For the full walkthrough, see:
 
@@ -160,6 +181,15 @@ cargo fmt --check
 cargo test
 bash scripts/smoke.sh
 ```
+
+## Manual QA for analysis mode
+
+```bash
+cargo run -- examples/password-login/secret_login --symbol check_password --analyze --render plain --color never
+cargo run -- --raw-hex "55 48 89 e5 48 83 ec 20 31 c0 c6 44 05 f0 41 48 83 c0 01 48 83 f8 40 75 f1 c9 c3" --arch x86-64 --analyze --render plain --color never
+```
+
+Expected outcome: the password example reports no supported memory-safety findings, while the synthetic raw-hex loop reports evidence-backed stack write risk findings.
 
 ## Project layout
 

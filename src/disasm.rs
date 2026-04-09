@@ -28,6 +28,7 @@ pub struct DisasmRequest {
     pub all_sections: bool,
     pub sections: Vec<String>,
     pub symbols: Vec<String>,
+    pub analyze: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,7 +57,7 @@ impl Architecture {
         }
     }
 
-    fn display_name(self) -> &'static str {
+    pub(crate) fn display_name(self) -> &'static str {
         match self {
             Self::X86 => "x86",
             Self::X86_64 => "x86_64",
@@ -109,13 +110,22 @@ impl RenderOptions {
             color_enabled,
         }
     }
+
+    pub(crate) fn is_pretty(&self) -> bool {
+        self.pretty
+    }
+
+    pub(crate) fn color_enabled(&self) -> bool {
+        self.color_enabled
+    }
 }
 
 #[derive(Debug)]
 pub struct DisassemblyReport {
-    target: String,
-    metadata: Vec<(String, String)>,
-    sections: Vec<DisassembledSection>,
+    pub(crate) target: String,
+    pub(crate) architecture: Architecture,
+    pub(crate) metadata: Vec<(String, String)>,
+    pub(crate) sections: Vec<DisassembledSection>,
 }
 
 impl DisassemblyReport {
@@ -284,20 +294,57 @@ impl StyledLine {
 }
 
 #[derive(Debug)]
-struct DisassembledSection {
-    name: String,
-    address: u64,
-    size: u64,
-    labels: BTreeMap<u64, Vec<String>>,
-    instructions: Vec<Instruction>,
+pub(crate) struct DisassembledSection {
+    pub(crate) name: String,
+    pub(crate) address: u64,
+    pub(crate) size: u64,
+    pub(crate) labels: BTreeMap<u64, Vec<String>>,
+    pub(crate) instructions: Vec<Instruction>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OperandAccess {
+    ReadOnly,
+    WriteOnly,
+    ReadWrite,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OperandDetail {
+    Register {
+        name: Option<String>,
+        access: Option<OperandAccess>,
+        size: u8,
+    },
+    Immediate {
+        value: i64,
+        size: u8,
+    },
+    Memory {
+        segment: Option<String>,
+        base: Option<String>,
+        index: Option<String>,
+        scale: i32,
+        disp: i64,
+        access: Option<OperandAccess>,
+        size: u8,
+    },
+    Invalid,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct InstructionDetail {
+    pub(crate) groups: Vec<String>,
+    pub(crate) operands: Vec<OperandDetail>,
 }
 
 #[derive(Debug)]
-struct Instruction {
-    address: u64,
-    bytes: Vec<u8>,
-    mnemonic: String,
-    operands: String,
+pub(crate) struct Instruction {
+    pub(crate) address: u64,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) mnemonic: String,
+    pub(crate) operands: String,
+    pub(crate) detail: Option<InstructionDetail>,
 }
 
 impl Instruction {
@@ -400,7 +447,7 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
 
     let architecture = resolve_file_architecture(&file, request.architecture)?;
 
-    let capstone = build_capstone(architecture, request.syntax)?;
+    let capstone = build_capstone(architecture, request.syntax, request.analyze)?;
 
     if !request.symbols.is_empty() {
         let sections = disassemble_requested_symbols(&file, &capstone, request)?;
@@ -429,6 +476,7 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
 
         return Ok(DisassemblyReport {
             target: path.display().to_string(),
+            architecture,
             metadata,
             sections,
         });
@@ -453,7 +501,7 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
             continue;
         }
 
-        let instructions = disassemble_bytes(&capstone, data, section.address())
+        let instructions = disassemble_bytes(&capstone, data, section.address(), request.analyze)
             .with_context(|| format!("failed to disassemble section {safe_name}"))?;
 
         sections.push(DisassembledSection {
@@ -499,6 +547,7 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
 
     Ok(DisassemblyReport {
         target: path.display().to_string(),
+        architecture,
         metadata,
         sections,
     })
@@ -530,12 +579,13 @@ fn disassemble_raw(raw_hex: &str, request: &DisasmRequest) -> Result<Disassembly
         "--symbol is only supported when disassembling files"
     );
     let bytes = parse_hex_bytes(raw_hex)?;
-    let capstone = build_capstone(architecture, request.syntax)?;
-    let instructions = disassemble_bytes(&capstone, &bytes, request.base_address)
+    let capstone = build_capstone(architecture, request.syntax, request.analyze)?;
+    let instructions = disassemble_bytes(&capstone, &bytes, request.base_address, request.analyze)
         .context("failed to disassemble raw bytes")?;
 
     Ok(DisassemblyReport {
         target: "<raw-hex>".into(),
+        architecture,
         metadata: vec![
             ("architecture".into(), architecture.display_name().into()),
             (
@@ -555,34 +605,34 @@ fn disassemble_raw(raw_hex: &str, request: &DisasmRequest) -> Result<Disassembly
     })
 }
 
-fn build_capstone(architecture: Architecture, syntax: Syntax) -> Result<Capstone> {
+fn build_capstone(architecture: Architecture, syntax: Syntax, detail: bool) -> Result<Capstone> {
     let capstone = match architecture {
         Architecture::X86 => Capstone::new()
             .x86()
             .mode(arch::x86::ArchMode::Mode32)
             .syntax(map_x86_syntax(syntax))
-            .detail(false)
+            .detail(detail)
             .build(),
         Architecture::X86_64 => Capstone::new()
             .x86()
             .mode(arch::x86::ArchMode::Mode64)
             .syntax(map_x86_syntax(syntax))
-            .detail(false)
+            .detail(detail)
             .build(),
         Architecture::Arm => Capstone::new()
             .arm()
             .mode(arch::arm::ArchMode::Arm)
-            .detail(false)
+            .detail(detail)
             .build(),
         Architecture::Thumb => Capstone::new()
             .arm()
             .mode(arch::arm::ArchMode::Thumb)
-            .detail(false)
+            .detail(detail)
             .build(),
         Architecture::Aarch64 => Capstone::new()
             .arm64()
             .mode(arch::arm64::ArchMode::Arm)
-            .detail(false)
+            .detail(detail)
             .build(),
     };
 
@@ -596,20 +646,104 @@ fn map_x86_syntax(syntax: Syntax) -> arch::x86::ArchSyntax {
     }
 }
 
-fn disassemble_bytes(capstone: &Capstone, bytes: &[u8], address: u64) -> Result<Vec<Instruction>> {
+fn disassemble_bytes(
+    capstone: &Capstone,
+    bytes: &[u8],
+    address: u64,
+    with_detail: bool,
+) -> Result<Vec<Instruction>> {
     let instructions = capstone
         .disasm_all(bytes, address)
         .map_err(|error| anyhow!("capstone failed to decode bytes at {address:#x}: {error}"))?;
 
     Ok(instructions
         .iter()
-        .map(|instruction| Instruction {
-            address: instruction.address(),
-            bytes: instruction.bytes().to_vec(),
-            mnemonic: instruction.mnemonic().unwrap_or("<unknown>").to_owned(),
-            operands: instruction.op_str().unwrap_or_default().to_owned(),
+        .map(|instruction| {
+            let detail = if with_detail {
+                Some(extract_instruction_detail(capstone, instruction)?)
+            } else {
+                None
+            };
+
+            Ok(Instruction {
+                address: instruction.address(),
+                bytes: instruction.bytes().to_vec(),
+                mnemonic: instruction.mnemonic().unwrap_or("<unknown>").to_owned(),
+                operands: instruction.op_str().unwrap_or_default().to_owned(),
+                detail,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>>>()?)
+}
+
+fn extract_instruction_detail(
+    capstone: &Capstone,
+    instruction: &capstone::Insn<'_>,
+) -> Result<InstructionDetail> {
+    let detail = capstone.insn_detail(instruction).map_err(|error| {
+        anyhow!(
+            "failed to fetch instruction detail at {:#x}: {error}",
+            instruction.address()
+        )
+    })?;
+    let arch_detail = detail.arch_detail();
+    let Some(x86_detail) = arch_detail.x86() else {
+        return Ok(InstructionDetail::default());
+    };
+
+    let groups = detail
+        .groups()
+        .iter()
+        .filter_map(|group| capstone.group_name(*group))
+        .collect();
+    let operands = x86_detail
+        .operands()
+        .map(|operand| map_x86_operand(capstone, operand))
+        .collect();
+
+    Ok(InstructionDetail { groups, operands })
+}
+
+fn map_x86_operand(capstone: &Capstone, operand: arch::x86::X86Operand) -> OperandDetail {
+    use arch::x86::X86OperandType;
+
+    match operand.op_type {
+        X86OperandType::Reg(reg_id) => OperandDetail::Register {
+            name: resolve_reg_name(capstone, reg_id),
+            access: operand.access.map(map_operand_access),
+            size: operand.size,
+        },
+        X86OperandType::Imm(value) => OperandDetail::Immediate {
+            value,
+            size: operand.size,
+        },
+        X86OperandType::Mem(memory) => OperandDetail::Memory {
+            segment: resolve_reg_name(capstone, memory.segment()),
+            base: resolve_reg_name(capstone, memory.base()),
+            index: resolve_reg_name(capstone, memory.index()),
+            scale: memory.scale(),
+            disp: memory.disp(),
+            access: operand.access.map(map_operand_access),
+            size: operand.size,
+        },
+        X86OperandType::Invalid => OperandDetail::Invalid,
+    }
+}
+
+fn resolve_reg_name(capstone: &Capstone, reg_id: RegId) -> Option<String> {
+    if reg_id.0 == 0 {
+        None
+    } else {
+        capstone.reg_name(reg_id)
+    }
+}
+
+fn map_operand_access(access: capstone::RegAccessType) -> OperandAccess {
+    match access {
+        capstone::RegAccessType::ReadOnly => OperandAccess::ReadOnly,
+        capstone::RegAccessType::WriteOnly => OperandAccess::WriteOnly,
+        capstone::RegAccessType::ReadWrite => OperandAccess::ReadWrite,
+    }
 }
 
 fn should_disassemble_section(
@@ -726,10 +860,11 @@ fn disassemble_requested_symbols(
         );
 
         let symbol_bytes = &data[start..start + size];
-        let instructions = disassemble_bytes(capstone, symbol_bytes, symbol.address())
-            .with_context(|| {
-                format!("failed to disassemble symbol {}", escape_for_terminal(name))
-            })?;
+        let instructions =
+            disassemble_bytes(capstone, symbol_bytes, symbol.address(), request.analyze)
+                .with_context(|| {
+                    format!("failed to disassemble symbol {}", escape_for_terminal(name))
+                })?;
 
         matched.insert(name.to_owned());
         sections.push(DisassembledSection {
@@ -1365,24 +1500,28 @@ mod tests {
                     bytes: vec![0x55],
                     mnemonic: "push".into(),
                     operands: "rbp".into(),
+                    detail: None,
                 },
                 Instruction {
                     address: 0x1001,
                     bytes: vec![0x48, 0x89, 0xe5],
                     mnemonic: "mov".into(),
                     operands: "rbp, rsp".into(),
+                    detail: None,
                 },
                 Instruction {
                     address: 0x1004,
                     bytes: vec![0x5d],
                     mnemonic: "pop".into(),
                     operands: "rbp".into(),
+                    detail: None,
                 },
                 Instruction {
                     address: 0x1005,
                     bytes: vec![0xc3],
                     mnemonic: "ret".into(),
                     operands: String::new(),
+                    detail: None,
                 },
             ],
         }
@@ -1391,6 +1530,7 @@ mod tests {
     fn sample_report() -> DisassemblyReport {
         DisassemblyReport {
             target: "<test>".into(),
+            architecture: Architecture::X86_64,
             metadata: vec![
                 ("architecture".into(), "x86_64".into()),
                 ("base-address".into(), "0x0".into()),
@@ -1481,6 +1621,7 @@ mod tests {
             all_sections: false,
             sections: Vec::new(),
             symbols: Vec::new(),
+            analyze: false,
         };
 
         assert!(disassemble(request).is_err());
@@ -1496,6 +1637,7 @@ mod tests {
             all_sections: false,
             sections: Vec::new(),
             symbols: Vec::new(),
+            analyze: false,
         };
 
         let report = disassemble(request).unwrap().to_string();
@@ -1513,6 +1655,7 @@ mod tests {
             all_sections: false,
             sections: vec![".init".into()],
             symbols: Vec::new(),
+            analyze: false,
         };
 
         assert!(should_disassemble_section(
@@ -1533,6 +1676,7 @@ mod tests {
     fn labeled_output_preserves_instruction_order() {
         let report = DisassemblyReport {
             target: "<test>".into(),
+            architecture: Architecture::X86_64,
             metadata: Vec::new(),
             sections: vec![DisassembledSection {
                 name: ".text".into(),
@@ -1545,12 +1689,14 @@ mod tests {
                         bytes: vec![0x90],
                         mnemonic: "nop".into(),
                         operands: String::new(),
+                        detail: None,
                     },
                     Instruction {
                         address: 0x1001,
                         bytes: vec![0xc3],
                         mnemonic: "ret".into(),
                         operands: String::new(),
+                        detail: None,
                     },
                 ],
             }],
@@ -1640,6 +1786,7 @@ mod tests {
     fn mnemonic_output_is_escaped_in_plain_and_pretty_modes() {
         let report = DisassemblyReport {
             target: "<test>".into(),
+            architecture: Architecture::X86_64,
             metadata: Vec::new(),
             sections: vec![DisassembledSection {
                 name: ".text".into(),
@@ -1651,6 +1798,7 @@ mod tests {
                     bytes: vec![0xc3],
                     mnemonic: "ret\n\x1b[31mboom".into(),
                     operands: String::new(),
+                    detail: None,
                 }],
             }],
         };
@@ -1666,6 +1814,7 @@ mod tests {
     fn label_and_operand_output_are_escaped_in_pretty_mode() {
         let report = DisassemblyReport {
             target: "<test>".into(),
+            architecture: Architecture::X86_64,
             metadata: Vec::new(),
             sections: vec![DisassembledSection {
                 name: ".text".into(),
@@ -1677,6 +1826,7 @@ mod tests {
                     bytes: vec![0xc3],
                     mnemonic: "ret".into(),
                     operands: "rax, \n\x1b[31mboom".into(),
+                    detail: None,
                 }],
             }],
         };
@@ -1707,6 +1857,7 @@ mod tests {
                 bytes: vec![0x90],
                 mnemonic: "mov".into(),
                 operands: format!("rax, {}", "L".repeat(128)),
+                detail: None,
             })
             .collect();
         let section = DisassembledSection {

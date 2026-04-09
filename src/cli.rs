@@ -51,6 +51,10 @@ pub struct Cli {
     /// Control the render style. Auto uses pretty boxes on terminals and plain output elsewhere.
     #[arg(long, value_enum, default_value_t = CliRender::Auto)]
     pub render: CliRender,
+
+    /// Run conservative semantic risk analysis on decoded disassembly.
+    #[arg(long)]
+    pub analyze: bool,
 }
 
 impl Cli {
@@ -88,6 +92,7 @@ impl Cli {
             all_sections: self.all_sections,
             sections: self.sections,
             symbols: self.symbols,
+            analyze: self.analyze,
         })
     }
 }

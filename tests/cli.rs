@@ -105,6 +105,47 @@ fn cli_disassembles_raw_x86_64_bytes() {
 }
 
 #[test]
+fn cli_analysis_reports_no_supported_finding_for_simple_raw_function() {
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .args([
+            "--raw-hex",
+            "55 48 89 e5 5d c3",
+            "--arch",
+            "x86-64",
+            "--analyze",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("analysis     : enabled"))
+        .stdout(predicate::str::contains(
+            "No supported memory-safety findings were identified",
+        ));
+}
+
+#[test]
+fn cli_analysis_reports_stack_write_loop_findings_for_risky_raw_sample() {
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .args([
+            "--raw-hex",
+            "55 48 89 e5 48 83 ec 20 31 c0 c6 44 05 f0 41 48 83 c0 01 48 83 f8 40 75 f1 c9 c3",
+            "--arch",
+            "x86-64",
+            "--analyze",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "potential-stack-buffer-write-risk",
+        ))
+        .stdout(predicate::str::contains(
+            "possible-out-of-bounds-local-write",
+        ))
+        .stdout(predicate::str::contains("suspicious-copy-loop"));
+}
+
+#[test]
 fn cli_supports_att_syntax_for_x86_64() {
     let mut command = Command::cargo_bin("assembler").unwrap();
     command
@@ -341,6 +382,26 @@ fn cli_can_disassemble_specific_symbol_only() {
         .stdout(predicate::str::contains("[.init]").not())
         .stdout(predicate::str::contains("<init_func>:").not())
         .stdout(predicate::str::contains("nop").not());
+
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn cli_can_analyze_specific_symbol_from_object_file() {
+    let path = unique_temp_path("symbol-analyze.o");
+    write_test_object(&path);
+
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .arg(&path)
+        .args(["--symbol", "entry", "--analyze"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("symbols     : entry"))
+        .stdout(predicate::str::contains("analysis     : enabled"))
+        .stdout(predicate::str::contains(
+            "No supported memory-safety findings were identified",
+        ));
 
     fs::remove_file(path).unwrap();
 }

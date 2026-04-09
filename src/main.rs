@@ -1,3 +1,4 @@
+mod analysis;
 mod cli;
 mod disasm;
 
@@ -14,7 +15,12 @@ fn main() -> Result<()> {
     let term_is_dumb = env::var_os("TERM")
         .is_some_and(|value| value.to_string_lossy().eq_ignore_ascii_case("dumb"));
     let render_options = cli.render_options(stdout_is_terminal, no_color, term_is_dumb);
+    let analyze = cli.analyze;
     let report = disasm::disassemble(cli.into_request()?)?;
     print!("{}", report.render(&render_options));
+    if analyze {
+        let analysis = analysis::analyze(&report);
+        print!("{}", analysis.render(&render_options));
+    }
     Ok(())
 }

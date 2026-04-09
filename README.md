@@ -1,7 +1,7 @@
 # assembler
 
 <p align="center">
-  <strong>A terminal-first Rust disassembler I built to inspect machine code from raw bytes, binaries, and individual symbols without leaving the shell.</strong>
+  <strong>A Rust disassembler for raw opcode streams, object-backed executable code, symbol-scoped inspection, and conservative semantic post-processing from the command line.</strong>
 </p>
 
 ## Output preview
@@ -24,32 +24,78 @@
   <img src="cape3.png" alt="assembler analysis output" width="100%" />
 </p>
 
-## Why I built this
+## Overview
 
-I wanted a disassembler that feels direct: point it at raw hex, an object or executable, or one specific symbol, and get readable assembly immediately. `assembler` is the tool I built for that workflow. It is focused, scriptable, careful about terminal behavior, and clean enough to use both interactively and in captured output.
+`assembler` is a terminal-oriented disassembly frontend implemented in Rust. It accepts either raw machine-code bytes or object-backed binaries, decodes instructions through Capstone, resolves section and symbol context through `object`, and renders normalized assembly listings for interactive reverse engineering, shell-driven inspection, and captured output.
 
-## What it does
+The project is intentionally constrained to decoding, rendering, and conservative semantic reporting. It is not a decompiler, source reconstructor, symbolic executor, or exploitability oracle. The analysis mode is designed to stay evidence-backed and architecture-aware rather than turning mnemonic names or imported APIs into unsupported vulnerability claims.
 
-- Disassembles raw hex bytes
-- Disassembles executable sections from binaries parsed through `object`
-- Focuses output with `--symbol` and `--section`
-- Uses Intel / AMD-style syntax by default for x86 and x86_64
-- Supports optional AT&T syntax with `--syntax att`
-- Supports conservative semantic analysis with `--analyze`
-- Renders both pretty and plain output
-- Supports ANSI coloring in both pretty and plain modes
-- Falls back to plain output automatically for captured / non-TTY output
-- Escapes hostile terminal content and enforces input limits
+## Core capabilities
 
-## Quick start
+- Decode raw machine code from hex input with explicit architecture selection
+- Disassemble executable sections from ELF and other object-backed binaries parsed through `object`
+- Restrict file disassembly to selected symbols or sections for targeted inspection
+- Emit Intel syntax by default for x86 and x86_64, with optional AT&T syntax via `--syntax att`
+- Render either structured pretty output or flat plain output depending on terminal context and workflow needs
+- Preserve ANSI color support in both render modes
+- Fall back to plain output automatically when stdout is not a TTY
+- Run conservative semantic analysis with `--analyze` for supported x86 and x86_64 disassembly
+- Escape hostile terminal content and enforce explicit input-size limits for safer CLI use
 
-### Show help
+## Build and execution
+
+### Requirements
+
+- Rust toolchain with Cargo
+- A working C compiler only if you want to build the demo target in `examples/password-login/`
+
+### Build from source
+
+```bash
+cargo build --release
+```
+
+### Show CLI help
 
 ```bash
 cargo run -- --help
 ```
 
-### Disassemble raw bytes
+## CLI model
+
+The tool operates in two primary input modes:
+
+1. **Raw-byte mode** via `--raw-hex`
+2. **File mode** via a positional `FILE` argument
+
+Raw-byte disassembly requires an explicit architecture because there is no container metadata to infer decode mode safely. File mode uses object metadata where possible, with explicit ARM/Thumb override support when metadata alone is not sufficient.
+
+### Synopsis
+
+```text
+assembler [FILE] [OPTIONS]
+assembler --raw-hex <HEX> [OPTIONS]
+```
+
+### Primary options
+
+| Option | Purpose | Notes |
+|---|---|---|
+| `FILE` | Binary or object file to disassemble | Required unless `--raw-hex` is provided |
+| `--raw-hex <HEX>` | Decode raw machine code bytes | Conflicts with file input |
+| `--arch <ARCH>` | Force architecture or override decode mode | Required for raw input |
+| `--base-address <ADDR>` | Base address for raw-byte output | Raw mode only in practice |
+| `--all-sections` | Include every non-empty section | Default file mode prefers executable sections |
+| `--section <NAME>` | Restrict file disassembly to named section(s) | May be repeated |
+| `--symbol <NAME>` | Restrict file disassembly to named symbol(s) | File mode only; may be repeated |
+| `--syntax <intel\|att>` | x86/x86_64 syntax selection | Default is `intel` |
+| `--render <auto\|pretty\|plain>` | Output layout selection | `auto` follows TTY state |
+| `--color <auto\|always\|never>` | ANSI color control | `auto` respects terminal conditions |
+| `--analyze` | Run conservative semantic analysis on decoded disassembly | Analysis is currently implemented for x86 and x86_64 |
+
+## Quick-start workflows
+
+### Decode a minimal x86_64 function from raw bytes
 
 ```bash
 cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64
@@ -61,22 +107,16 @@ cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64
 cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render pretty --color never
 ```
 
-### Force plain output with color
+### Force plain output with ANSI color
 
 ```bash
 cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render plain --color always
 ```
 
-### Disassemble one symbol from a binary
+### Disassemble a single symbol from a binary
 
 ```bash
 cargo run -- ./target/debug/assembler --symbol main
-```
-
-### Add conservative analysis to disassembly output
-
-```bash
-cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --analyze
 ```
 
 ### Restrict output to selected sections
@@ -85,36 +125,10 @@ cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --analyze
 cargo run -- ./target/debug/assembler --section .text --section .init
 ```
 
-## Reverse-engineering workflow example
-
-I also added a small C demo in `examples/password-login/` to show exactly why this tool is useful.
-
-Build the demo binary:
+### Add semantic analysis to a raw disassembly run
 
 ```bash
-gcc -O0 -g -fno-inline -fno-builtin -no-pie -o examples/password-login/secret_login examples/password-login/secret_login.c
-```
-
-Then disassemble only the password check:
-
-```bash
-cargo run -- examples/password-login/secret_login --symbol check_password --render pretty --color never
-```
-
-Or run the conservative analyzer on that symbol:
-
-```bash
-cargo run -- examples/password-login/secret_login --symbol check_password --analyze --render plain --color never
-```
-
-The output shows the password logic as immediate byte comparisons inside `check_password`. In other words, the secret falls straight out of the disassembly. That is exactly the kind of failure this tool makes obvious.
-
-With `--analyze`, this example should stay conservative and report no supported memory-safety findings, because the function performs byte-by-byte comparisons rather than unsafe copying.
-
-For the full walkthrough, see:
-
-```text
-examples/password-login/README.md
+cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --analyze
 ```
 
 ## Output behavior
@@ -122,12 +136,12 @@ examples/password-login/README.md
 ### Render mode
 
 - `--render auto`
-  - interactive terminal: pretty output
-  - captured / piped output: plain output
+  - pretty output on interactive terminals
+  - plain output when stdout is captured or piped
 - `--render pretty`
-  - always uses the structured box layout
+  - forces structured box-oriented output
 - `--render plain`
-  - always uses the flat text layout
+  - forces flat text output suitable for logs, grep, and pipelines
 
 ### Color mode
 
@@ -136,43 +150,126 @@ examples/password-login/README.md
   - disables color when `NO_COLOR` is present
   - disables color when `TERM=dumb`
 - `--color always`
-  - forces ANSI coloring, including plain mode
+  - forces ANSI color even in plain output
 - `--color never`
-  - disables ANSI coloring completely
+  - disables ANSI color entirely
 
-## Architecture notes
+## Architecture support
 
-- Default x86 / x86_64 syntax is `intel` (Intel / AMD-style)
-- `att` remains available with `--syntax att`
+### Supported decode targets
+
+| Target | Input mode | Notes |
+|---|---|---|
+| x86 | raw bytes, file-backed | Intel syntax default, AT&T optional |
+| x86_64 | raw bytes, file-backed | Intel syntax default, AT&T optional |
+| AArch64 | raw bytes, file-backed when metadata is sufficient | Use `--arch aarch64` for raw input |
+| ARM | file-backed with explicit override | Use `--arch arm` |
+| Thumb | file-backed with explicit override | Use `--arch thumb` |
+
+### Architecture notes
+
 - Raw-byte disassembly requires `--arch`
-- AArch64 raw disassembly is supported with `--arch aarch64`
-- ARM file disassembly requires an explicit mode choice:
-  - `--arch arm`
-  - `--arch thumb`
+- ARM and Thumb are intentionally explicit in file mode because object metadata alone is not always sufficient to infer the correct decode mode safely
+- `--syntax att` only affects x86 and x86_64 output
 
-I made that ARM behavior explicit on purpose. Object metadata is not always enough to infer the correct ARM decode mode safely.
+## Semantic analysis mode
+
+`--analyze` appends a dedicated analysis section after the disassembly report. The analyzer consumes Capstone detail-mode output and uses typed operand information, memory addressing structure, access direction, and limited frame/loop reconstruction to emit conservative findings.
+
+### Current analysis scope
+
+The current implementation is intended for **x86** and **x86_64** disassembly. For unsupported architectures, analysis mode remains explicit but will report that no architecture-specific semantic analyzer is currently implemented.
+
+### Finding model
+
+Each reported finding is structured around:
+
+- finding class
+- severity tier
+- address and section/symbol context
+- factual rationale grounded in decoded instruction behavior
+
+### Current finding classes
+
+- potential stack-buffer write risk
+- possible out-of-bounds local write
+- suspicious copy loop
+- unsafe stack-frame write
+- stack-pointer / frame-pointer anomaly
+- indirect write risk
+
+### Analysis constraints
+
+The analyzer is deliberately conservative.
+
+- It does **not** claim exploitability from disassembly alone
+- It does **not** promote imported APIs or mnemonic names into findings without behavioral evidence
+- It does **not** attempt source reconstruction or decompilation
+- It does **not** treat weak evidence as proof of a specific overwrite primitive
+
+## Reverse-engineering example
+
+`examples/password-login/` contains a compact C target compiled to preserve straightforward machine code:
+
+- debug information is retained
+- inlining is disabled
+- builtin substitution is suppressed
+- the binary is linked as non-PIE
+
+This produces a small ELF sample that is convenient for symbol-scoped inspection and low-level control-flow review.
+
+### Build the demo target
+
+```bash
+gcc -O0 -g -fno-inline -fno-builtin -no-pie -o examples/password-login/secret_login examples/password-login/secret_login.c
+```
+
+### Inspect the password-check function
+
+```bash
+cargo run -- examples/password-login/secret_login --symbol check_password --render pretty --color never
+```
+
+### Run the analyzer on the same symbol
+
+```bash
+cargo run -- examples/password-login/secret_login --symbol check_password --analyze --render plain --color never
+```
+
+The resulting disassembly exposes `check_password` as a linear sequence of immediate byte comparisons. That makes the validation logic visible directly at the instruction level without requiring a decompiler or source access.
+
+In analysis mode, this example should remain a **negative case** for supported memory-safety findings. The function compares bytes against a caller-controlled pointer, but it does not exhibit the local copy or repeated stack-write behavior required for an overflow-style report.
+
+For the full walkthrough, see:
+
+```text
+examples/password-login/README.md
+```
 
 ## Safety and robustness
 
-- Hostile strings are escaped before rendering
-- Pretty output preserves full instruction text instead of clipping it
-- Raw hex input is capped at 8192 decoded bytes
-- Input files must be regular files and are capped at 128 MiB
-- Symbol selection is file-only and validated clearly on error
+- Hostile strings are escaped before rendering to reduce terminal-control abuse
+- Pretty output preserves full instruction text instead of clipping operands or labels
+- Raw hex input is capped at **8192 decoded bytes** to bound decode cost and output volume
+- Input files must be regular files and are capped at **128 MiB**
+- Symbol selection is limited to file input and validated with explicit error reporting
+- Non-interactive output defaults to a stable plain-text representation
 
 ## Compatibility matrix
 
 | Area | Status | Notes |
 |---|---|---|
-| x86 raw bytes | supported | Intel / AMD-style syntax by default, AT&T optional |
-| x86_64 raw bytes | supported | Intel / AMD-style syntax by default, AT&T optional |
-| AArch64 raw bytes | supported | explicit `--arch aarch64` |
+| x86 raw bytes | supported | Intel syntax default, AT&T optional |
+| x86_64 raw bytes | supported | Intel syntax default, AT&T optional |
+| AArch64 raw bytes | supported | use `--arch aarch64` |
 | ARM object files | explicit override required | use `--arch arm` or `--arch thumb` |
 | Symbol filtering | supported for file input | `--symbol` is rejected for raw hex |
+| Section filtering | supported for file input | `--section` may be repeated |
 | Pretty output | supported | default on interactive terminals |
-| Plain output | supported | default for non-TTY / captured output |
-| ANSI color in plain mode | supported | use `--render plain --color always` if you want flat colored output |
-| CI verification | supported | GitHub Actions runs fmt, tests, and smoke verification |
+| Plain output | supported | default for captured or piped output |
+| ANSI color in plain mode | supported | use `--render plain --color always` |
+| Semantic analysis | supported for x86/x86_64 | enabled with `--analyze` |
+| CI verification | supported | GitHub Actions runs formatting, tests, and smoke verification |
 
 ## Verification
 
@@ -189,7 +286,10 @@ cargo run -- examples/password-login/secret_login --symbol check_password --anal
 cargo run -- --raw-hex "55 48 89 e5 48 83 ec 20 31 c0 c6 44 05 f0 41 48 83 c0 01 48 83 f8 40 75 f1 c9 c3" --arch x86-64 --analyze --render plain --color never
 ```
 
-Expected outcome: the password example reports no supported memory-safety findings, while the synthetic raw-hex loop reports evidence-backed stack write risk findings.
+Expected outcome:
+
+- the password example reports no supported memory-safety findings
+- the synthetic raw-hex loop reports evidence-backed findings for repeated stack-local writes and weak destination-bound evidence
 
 ## Project layout
 
@@ -199,3 +299,13 @@ tests/                       integration tests
 scripts/smoke.sh             quick verification script
 examples/password-login/     reverse-engineering demo target
 ```
+
+## Implementation notes
+
+- Language: Rust 2024 edition
+- Decoder backend: Capstone
+- Object parsing and symbol extraction: `object`
+- CLI parsing: `clap`
+- Error handling: `anyhow`
+
+This repository is optimized for low-friction local use: build the binary, point it at raw bytes or a target file, and get deterministic decoded output with optional semantic post-processing from the same command-line entry point.

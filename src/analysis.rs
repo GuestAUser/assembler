@@ -7,6 +7,8 @@ use crate::disasm::{
     OperandDetail, RenderOptions,
 };
 
+const FRAME_SETUP_SCAN_LIMIT: usize = 16;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AnalysisReport {
     architecture: Architecture,
@@ -174,7 +176,7 @@ impl AnalysisReport {
 
     fn render_pretty(&self, color_enabled: bool) -> String {
         let mut lines = vec![StyledLine::styled(
-            "architecture x86".into(),
+            format!("architecture {}", self.architecture.display_name()),
             format!(
                 "{} {}",
                 style_meta_key("architecture", color_enabled),
@@ -182,7 +184,7 @@ impl AnalysisReport {
             ),
         )];
         lines.push(StyledLine::styled(
-            "findings 0".into(),
+            format!("findings {}", self.findings.len()),
             format!(
                 "{} {}",
                 style_meta_key("findings", color_enabled),
@@ -416,15 +418,15 @@ fn analyze_loop(
 fn detect_frame_state(section: &DisassembledSection) -> FrameState {
     let mut state = FrameState::default();
 
-    for instruction in section.instructions.iter().take(6) {
+    for instruction in section.instructions.iter().take(FRAME_SETUP_SCAN_LIMIT) {
         let mnemonic = instruction.mnemonic.to_ascii_lowercase();
         let operands = instruction
             .detail
             .as_ref()
             .map(|detail| detail.operands.as_slice());
 
-        if mnemonic == "mov" {
-            if let Some(
+        if mnemonic == "mov"
+            && let Some(
                 [
                     OperandDetail::Register {
                         name: Some(dst), ..
@@ -435,23 +437,22 @@ fn detect_frame_state(section: &DisassembledSection) -> FrameState {
                     ..,
                 ],
             ) = operands
-            {
-                match (dst.as_str(), src.as_str()) {
-                    ("rbp", "rsp") => {
-                        state.base = Some(FrameBase::Rbp);
-                        state.frame_pointer_established = true;
-                    }
-                    ("ebp", "esp") => {
-                        state.base = Some(FrameBase::Ebp);
-                        state.frame_pointer_established = true;
-                    }
-                    _ => {}
+        {
+            match (dst.as_str(), src.as_str()) {
+                ("rbp", "rsp") => {
+                    state.base = Some(FrameBase::Rbp);
+                    state.frame_pointer_established = true;
                 }
+                ("ebp", "esp") => {
+                    state.base = Some(FrameBase::Ebp);
+                    state.frame_pointer_established = true;
+                }
+                _ => {}
             }
         }
 
-        if mnemonic == "sub" {
-            if let Some(
+        if mnemonic == "sub"
+            && let Some(
                 [
                     OperandDetail::Register {
                         name: Some(dst), ..
@@ -460,22 +461,21 @@ fn detect_frame_state(section: &DisassembledSection) -> FrameState {
                     ..,
                 ],
             ) = operands
-            {
-                match dst.as_str() {
-                    "rsp" => {
-                        state.base.get_or_insert(FrameBase::Rsp);
-                        if *value > 0 {
-                            state.size = Some(*value);
-                        }
+        {
+            match dst.as_str() {
+                "rsp" => {
+                    state.base.get_or_insert(FrameBase::Rsp);
+                    if *value > 0 {
+                        state.size = Some(*value);
                     }
-                    "esp" => {
-                        state.base.get_or_insert(FrameBase::Esp);
-                        if *value > 0 {
-                            state.size = Some(*value);
-                        }
-                    }
-                    _ => {}
                 }
+                "esp" => {
+                    state.base.get_or_insert(FrameBase::Esp);
+                    if *value > 0 {
+                        state.size = Some(*value);
+                    }
+                }
+                _ => {}
             }
         }
     }

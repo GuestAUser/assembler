@@ -578,6 +578,14 @@ fn disassemble_raw(raw_hex: &str, request: &DisasmRequest) -> Result<Disassembly
         request.symbols.is_empty(),
         "--symbol is only supported when disassembling files"
     );
+    ensure!(
+        request.sections.is_empty(),
+        "--section is only supported when disassembling files"
+    );
+    ensure!(
+        !request.all_sections,
+        "--all-sections is only supported when disassembling files"
+    );
     let bytes = parse_hex_bytes(raw_hex)?;
     let capstone = build_capstone(architecture, request.syntax, request.analyze)?;
     let instructions = disassemble_bytes(&capstone, &bytes, request.base_address, request.analyze)
@@ -656,7 +664,7 @@ fn disassemble_bytes(
         .disasm_all(bytes, address)
         .map_err(|error| anyhow!("capstone failed to decode bytes at {address:#x}: {error}"))?;
 
-    Ok(instructions
+    instructions
         .iter()
         .map(|instruction| {
             let detail = if with_detail {
@@ -673,7 +681,7 @@ fn disassemble_bytes(
                 detail,
             })
         })
-        .collect::<Result<Vec<_>>>()?)
+        .collect::<Result<Vec<_>>>()
 }
 
 fn extract_instruction_detail(
@@ -851,15 +859,40 @@ fn disassemble_requested_symbols(
                 escape_for_terminal(section_name)
             )
         })?;
-        let start = symbol.address().saturating_sub(section.address()) as usize;
-        let size = symbol.size() as usize;
+        let relative_start = symbol
+            .address()
+            .checked_sub(section.address())
+            .ok_or_else(|| {
+                anyhow!(
+                    "symbol {} points outside its containing section",
+                    escape_for_terminal(name)
+                )
+            })?;
+        let start = usize::try_from(relative_start).map_err(|_| {
+            anyhow!(
+                "symbol {} points outside its containing section",
+                escape_for_terminal(name)
+            )
+        })?;
+        let size = usize::try_from(symbol.size()).map_err(|_| {
+            anyhow!(
+                "symbol {} points outside its containing section",
+                escape_for_terminal(name)
+            )
+        })?;
+        let end = start.checked_add(size).ok_or_else(|| {
+            anyhow!(
+                "symbol {} points outside its containing section",
+                escape_for_terminal(name)
+            )
+        })?;
         ensure!(
-            start <= data.len() && start.saturating_add(size) <= data.len(),
+            end <= data.len(),
             "symbol {} points outside its containing section",
             escape_for_terminal(name)
         );
 
-        let symbol_bytes = &data[start..start + size];
+        let symbol_bytes = &data[start..end];
         let instructions =
             disassemble_bytes(capstone, symbol_bytes, symbol.address(), request.analyze)
                 .with_context(|| {
@@ -906,11 +939,12 @@ fn disassemble_requested_symbols(
 
 fn render_section_box(section: &DisassembledSection, color_enabled: bool) -> String {
     let safe_name = escape_for_terminal(&section.name);
+    let section_size = format!("{:#x}", section.size);
     let mut lines = vec![StyledLine::styled(
         format!(
             "addr {}  •  size {}  •  instructions {}",
             format_address(section.address),
-            format!("{:#x}", section.size),
+            section_size,
             section.instructions.len()
         ),
         format!(
@@ -919,7 +953,7 @@ fn render_section_box(section: &DisassembledSection, color_enabled: bool) -> Str
             style_address(&format_address(section.address), color_enabled),
             style_separator("•", color_enabled),
             style_meta_key("size", color_enabled),
-            style_number(&format!("{:#x}", section.size), color_enabled),
+            style_number(&section_size, color_enabled),
             style_separator("•", color_enabled),
             style_meta_key("instructions", color_enabled),
             style_number(&section.instructions.len().to_string(), color_enabled)
@@ -1122,7 +1156,7 @@ fn style_operands(operands: &str, color_enabled: bool) -> String {
 
         if let Some(end) = read_special_operand_token(bytes, index) {
             let token = &operands[index..end];
-            output.push_str(&style_operand_token(&token, color_enabled));
+            output.push_str(&style_operand_token(token, color_enabled));
             index = end;
             continue;
         }
@@ -1142,7 +1176,7 @@ fn style_operands(operands: &str, color_enabled: bool) -> String {
         }
 
         let token = &operands[start..index];
-        output.push_str(&style_operand_token(&token, color_enabled));
+        output.push_str(&style_operand_token(token, color_enabled));
     }
 
     output
@@ -1438,10 +1472,9 @@ fn parse_hex_bytes(raw: &str) -> Result<Vec<u8>> {
     );
 
     let mut bytes = Vec::with_capacity(nybbles.len() / 2);
-    for (index, pair) in nybbles.chunks_exact(2).enumerate() {
+    for pair in nybbles.chunks_exact(2) {
         let high = decode_hex_nybble(pair[0]).expect("validated high nybble");
         let low = decode_hex_nybble(pair[1]).expect("validated low nybble");
-        let _ = index;
         bytes.push((high << 4) | low);
     }
 

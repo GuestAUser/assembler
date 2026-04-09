@@ -1,11 +1,21 @@
 # assembler
 
 <p align="center">
-  <img src="cape.png" alt="assembler cape" width="100%" />
+  <strong>A terminal-first Rust disassembler I built to inspect machine code from raw bytes, binaries, and individual symbols without leaving the shell.</strong>
 </p>
 
+## Output preview
+
+### Pretty output
+
 <p align="center">
-  <strong>A terminal-first Rust disassembler I built to inspect machine code from raw bytes, binaries, and individual symbols without leaving the shell.</strong>
+  <img src="cape1.png" alt="assembler pretty output" width="100%" />
+</p>
+
+### Plain output
+
+<p align="center">
+  <img src="cape2.png" alt="assembler plain output" width="100%" />
 </p>
 
 ## Why I built this
@@ -125,7 +135,7 @@ I made that ARM behavior explicit on purpose. Object metadata is not always enou
 
 - Hostile strings are escaped before rendering
 - Pretty output preserves full instruction text instead of clipping it
-- Raw hex input is capped at 16384 decoded bytes
+- Raw hex input is capped at 8192 decoded bytes
 - Input files must be regular files and are capped at 128 MiB
 - Symbol selection is file-only and validated clearly on error
 

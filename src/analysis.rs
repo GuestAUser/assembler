@@ -452,13 +452,12 @@ fn detect_frame_state(section: &DisassembledSection) -> FrameState {
             break;
         }
 
-        let mnemonic = instruction.mnemonic.to_ascii_lowercase();
         let operands = instruction
             .detail
             .as_ref()
             .map(|detail| detail.operands.as_slice());
 
-        if mnemonic == "mov"
+        if instruction.mnemonic.eq_ignore_ascii_case("mov")
             && let Some(
                 [
                     OperandDetail::Register {
@@ -484,7 +483,7 @@ fn detect_frame_state(section: &DisassembledSection) -> FrameState {
             }
         }
 
-        if mnemonic == "sub"
+        if instruction.mnemonic.eq_ignore_ascii_case("sub")
             && let Some(
                 [
                     OperandDetail::Register {
@@ -719,40 +718,34 @@ fn jump_target(instruction: &Instruction) -> Option<u64> {
     })
 }
 
-fn memory_writes(instruction: &Instruction) -> Vec<MemoryOperandRef<'_>> {
+fn memory_writes(instruction: &Instruction) -> impl Iterator<Item = MemoryOperandRef<'_>> + '_ {
     instruction
         .detail
-        .as_ref()
-        .map(|detail| {
-            detail
-                .operands
-                .iter()
-                .filter_map(|operand| match operand {
-                    OperandDetail::Memory {
-                        base,
-                        index,
-                        disp,
-                        access,
-                        size,
-                        ..
-                    } if matches!(
-                        access,
-                        Some(OperandAccess::WriteOnly | OperandAccess::ReadWrite)
-                    ) =>
-                    {
-                        Some(MemoryOperandRef {
-                            base: base.as_deref(),
-                            index: index.as_deref(),
-                            disp: *disp,
-                            access: *access,
-                            size: *size,
-                        })
-                    }
-                    _ => None,
+        .iter()
+        .flat_map(|detail| detail.operands.iter())
+        .filter_map(|operand| match operand {
+            OperandDetail::Memory {
+                base,
+                index,
+                disp,
+                access,
+                size,
+                ..
+            } if matches!(
+                access,
+                Some(OperandAccess::WriteOnly | OperandAccess::ReadWrite)
+            ) =>
+            {
+                Some(MemoryOperandRef {
+                    base: base.as_deref(),
+                    index: index.as_deref(),
+                    disp: *disp,
+                    access: *access,
+                    size: *size,
                 })
-                .collect()
+            }
+            _ => None,
         })
-        .unwrap_or_default()
 }
 
 fn out_of_bounds_stack_write_reason(

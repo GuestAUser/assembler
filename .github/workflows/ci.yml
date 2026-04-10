@@ -39,11 +39,11 @@ jobs:
       - name: Build host fixture binary
         run: cargo build -p fixtures
       - name: Verify x86_64 fixture symbols
-        run: nm target/debug/fixtures | grep -c ' fixture_' | awk '$1 >= 10 { exit 0 } { exit 1 }'
+        run: test "$(nm target/debug/fixtures | grep -E -c '(^|[[:space:]])fixture_' || true)" -ge 10
       - name: Build AArch64 fixture binary
         run: cargo build -p fixtures --target aarch64-unknown-linux-gnu
       - name: Verify AArch64 fixture symbols
-        run: aarch64-linux-gnu-nm target/aarch64-unknown-linux-gnu/debug/fixtures | grep -c ' fixture_' | awk '$1 >= 2 { exit 0 } { exit 1 }'
+        run: test "$(aarch64-linux-gnu-nm target/aarch64-unknown-linux-gnu/debug/fixtures | grep -E -c '(^|[[:space:]])fixture_' || true)" -ge 2
       - name: Run fixture integration tests
         run: cargo test --test fixtures
 

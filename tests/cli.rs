@@ -93,6 +93,56 @@ fn write_thumb_test_object(path: &std::path::Path) {
     fs::write(path, object.write().unwrap()).unwrap();
 }
 
+fn write_thumb_lsb_symbol_test_object(path: &std::path::Path) {
+    let mut object = WriteObject::new(
+        BinaryFormat::Elf,
+        ObjectArchitecture::Arm,
+        Endianness::Little,
+    );
+    object.add_file_symbol(b"thumb-lsb-fixture.o".to_vec());
+
+    let text_section = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+    let entry_offset = object.append_section_data(text_section, &[0x00, 0xbf], 1);
+
+    object.add_symbol(Symbol {
+        name: b"thumb_entry".to_vec(),
+        value: entry_offset + 1,
+        size: 2,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: WriteSymbolSection::Section(text_section),
+        flags: SymbolFlags::None,
+    });
+
+    fs::write(path, object.write().unwrap()).unwrap();
+}
+
+fn write_big_endian_aarch64_test_object(path: &std::path::Path) {
+    let mut object = WriteObject::new(
+        BinaryFormat::Elf,
+        ObjectArchitecture::Aarch64,
+        Endianness::Big,
+    );
+    object.add_file_symbol(b"big-endian-aarch64.o".to_vec());
+
+    let text_section = object.add_section(Vec::new(), b".text".to_vec(), SectionKind::Text);
+    let entry_offset = object.append_section_data(text_section, &[0xc0, 0x03, 0x5f, 0xd6], 1);
+
+    object.add_symbol(Symbol {
+        name: b"entry".to_vec(),
+        value: entry_offset,
+        size: 4,
+        kind: SymbolKind::Text,
+        scope: SymbolScope::Linkage,
+        weak: false,
+        section: WriteSymbolSection::Section(text_section),
+        flags: SymbolFlags::None,
+    });
+
+    fs::write(path, object.write().unwrap()).unwrap();
+}
+
 #[test]
 fn cli_disassembles_raw_x86_64_bytes() {
     let mut command = Command::cargo_bin("assembler").unwrap();
@@ -373,6 +423,41 @@ fn cli_disassembles_thumb_object_file_when_overridden() {
         .stdout(predicate::str::contains("architecture: thumb"))
         .stdout(predicate::str::contains("<thumb_entry>:"))
         .stdout(predicate::str::contains("nop"));
+
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn cli_disassembles_thumb_symbol_with_lsb_set() {
+    let path = unique_temp_path("thumb-lsb-symbol.o");
+    write_thumb_lsb_symbol_test_object(&path);
+
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .arg(&path)
+        .args(["--arch", "thumb", "--symbol", "thumb_entry"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("[.text::thumb_entry]"))
+        .stdout(predicate::str::contains("<thumb_entry>:"))
+        .stdout(predicate::str::contains("nop"));
+
+    fs::remove_file(path).unwrap();
+}
+
+#[test]
+fn cli_rejects_big_endian_aarch64_object_files() {
+    let path = unique_temp_path("big-endian-aarch64.o");
+    write_big_endian_aarch64_test_object(&path);
+
+    let mut command = Command::cargo_bin("assembler").unwrap();
+    command
+        .arg(&path)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "big-endian objects are not currently supported for aarch64 disassembly",
+        ));
 
     fs::remove_file(path).unwrap();
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::fmt::{self, Display, Write as _};
 
 use unicode_width::UnicodeWidthStr;
@@ -73,7 +73,7 @@ impl DisassemblyReport {
                 style_number(&section.instructions.len().to_string(), color_enabled)
             );
 
-            let mut emitted_addresses = BTreeSet::new();
+            let mut emitted_addresses = HashSet::with_capacity(section.instructions.len());
             for instruction in &section.instructions {
                 if let Some(labels) = section.labels.get(&instruction.address) {
                     for label in labels {
@@ -248,7 +248,14 @@ impl Instruction {
             bytes.push_str(" …");
         }
 
-        format!("{:<width$}", bytes, width = BYTE_COLUMN_WIDTH)
+        if bytes.len() < BYTE_COLUMN_WIDTH {
+            bytes.reserve(BYTE_COLUMN_WIDTH - bytes.len());
+            while bytes.len() < BYTE_COLUMN_WIDTH {
+                bytes.push(' ');
+            }
+        }
+
+        bytes
     }
 }
 
@@ -279,7 +286,7 @@ pub(crate) fn render_section_box(section: &DisassembledSection, color_enabled: b
         lines.push(StyledLine::plain(String::new()));
     }
 
-    let mut emitted_addresses = BTreeSet::new();
+    let mut emitted_addresses = HashSet::with_capacity(section.instructions.len());
     for instruction in &section.instructions {
         if let Some(labels) = section.labels.get(&instruction.address) {
             for label in labels {
@@ -352,7 +359,11 @@ pub(crate) fn render_box(title_plain: &str, title_styled: &str, lines: &[StyledL
     let _ = writeln!(output, "╭─ {}{}╮", title_styled, "─".repeat(fill));
     for line in lines {
         let padding = inner_width.saturating_sub(visible_width(&line.plain));
-        let _ = writeln!(output, "│ {}{} │", line.styled, " ".repeat(padding));
+        let _ = write!(output, "│ {}", line.styled);
+        for _ in 0..padding {
+            output.push(' ');
+        }
+        let _ = writeln!(output, " │");
     }
     let _ = write!(output, "╰{}╯", "─".repeat(inner_width + 2));
     output
@@ -477,7 +488,7 @@ pub(crate) fn style_operands(operands: &str, color_enabled: bool) -> String {
         }
 
         if is_operand_separator_byte(bytes[index]) {
-            output.push_str(&style_separator(&current.to_string(), color_enabled));
+            output.push_str(&style_separator(&operands[index..index + 1], color_enabled));
             index += 1;
             continue;
         }
@@ -580,20 +591,15 @@ fn style_operand_token(token: &str, color_enabled: bool) -> String {
         return String::new();
     }
 
-    let register_like = token
-        .trim_start_matches('%')
-        .trim_end_matches(',')
-        .to_ascii_lowercase();
-    let size_like = token
+    let normalized = token
         .trim_start_matches(['#', '$', '%'])
-        .trim_end_matches(',')
-        .to_ascii_lowercase();
+        .trim_end_matches(',');
 
     if is_numeric_token(token) {
         style_number(token, color_enabled)
-    } else if is_register_token(&register_like) {
+    } else if is_register_token(normalized) {
         style_text(token, color_enabled, &["1", "96"])
-    } else if is_size_token(&size_like) {
+    } else if is_size_token(normalized) {
         style_text(token, color_enabled, &["1", "94"])
     } else {
         style_text(token, color_enabled, &["97"])
@@ -619,79 +625,29 @@ fn is_numeric_token(token: &str) -> bool {
 }
 
 fn is_register_token(token: &str) -> bool {
-    matches!(
+    matches_exact_ascii_case_any(
         token,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rsi"
-            | "rdi"
-            | "rbp"
-            | "rsp"
-            | "rip"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "esi"
-            | "edi"
-            | "ebp"
-            | "esp"
-            | "ax"
-            | "bx"
-            | "cx"
-            | "dx"
-            | "si"
-            | "di"
-            | "bp"
-            | "sp"
-            | "wsp"
-            | "al"
-            | "ah"
-            | "bl"
-            | "bh"
-            | "cl"
-            | "ch"
-            | "dl"
-            | "dh"
-            | "cs"
-            | "ds"
-            | "es"
-            | "fs"
-            | "gs"
-            | "ss"
-            | "pc"
-            | "lr"
-            | "fp"
-            | "ip"
-            | "xzr"
-            | "wzr"
-            | "nzcv"
-            | "fpcr"
-            | "fpsr"
-            | "daif"
-    ) || token.strip_prefix('r').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix('x').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix('w').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix('v').is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix("xmm").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix("ymm").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    }) || token.strip_prefix("zmm").is_some_and(|suffix| {
-        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
-    })
+        &[
+            "rax", "rbx", "rcx", "rdx", "rsi", "rdi", "rbp", "rsp", "rip", "eax", "ebx", "ecx",
+            "edx", "esi", "edi", "ebp", "esp", "ax", "bx", "cx", "dx", "si", "di", "bp", "sp",
+            "wsp", "al", "ah", "bl", "bh", "cl", "ch", "dl", "dh", "cs", "ds", "es", "fs", "gs",
+            "ss", "pc", "lr", "fp", "ip", "xzr", "wzr", "nzcv", "fpcr", "fpsr", "daif",
+        ],
+    ) || matches_prefixed_digits(token, "r")
+        || matches_prefixed_digits(token, "x")
+        || matches_prefixed_digits(token, "w")
+        || matches_prefixed_digits(token, "v")
+        || matches_prefixed_digits(token, "xmm")
+        || matches_prefixed_digits(token, "ymm")
+        || matches_prefixed_digits(token, "zmm")
 }
 
 fn is_size_token(token: &str) -> bool {
-    matches!(
+    matches_exact_ascii_case_any(
         token,
-        "byte" | "word" | "dword" | "qword" | "xword" | "xmmword" | "ymmword" | "zmmword" | "ptr"
+        &[
+            "byte", "word", "dword", "qword", "xword", "xmmword", "ymmword", "zmmword", "ptr",
+        ],
     )
 }
 
@@ -708,60 +664,83 @@ enum MnemonicCategory {
 }
 
 fn classify_mnemonic(mnemonic: &str) -> MnemonicCategory {
-    let mnemonic = mnemonic.trim().to_ascii_lowercase();
+    let mnemonic = mnemonic.trim();
 
-    if mnemonic == "nop" {
+    if mnemonic.eq_ignore_ascii_case("nop") {
         MnemonicCategory::Nop
-    } else if mnemonic.starts_with('j')
-        || matches!(
-            mnemonic.as_str(),
-            "call" | "ret" | "retq" | "b" | "bl" | "blr" | "br"
-        )
-        || mnemonic.starts_with("cb")
-        || mnemonic.starts_with("tb")
-        || mnemonic.starts_with("b.")
+    } else if starts_with_ignore_ascii_case(mnemonic, "j")
+        || matches_exact_ascii_case_any(mnemonic, &["call", "ret", "retq", "b", "bl", "blr", "br"])
+        || starts_with_ignore_ascii_case(mnemonic, "cb")
+        || starts_with_ignore_ascii_case(mnemonic, "tb")
+        || starts_with_ignore_ascii_case(mnemonic, "b.")
     {
         MnemonicCategory::ControlFlow
-    } else if mnemonic.starts_with("push")
-        || mnemonic.starts_with("pop")
-        || mnemonic == "enter"
-        || mnemonic == "leave"
+    } else if starts_with_ignore_ascii_case(mnemonic, "push")
+        || starts_with_ignore_ascii_case(mnemonic, "pop")
+        || mnemonic.eq_ignore_ascii_case("enter")
+        || mnemonic.eq_ignore_ascii_case("leave")
     {
         MnemonicCategory::Stack
-    } else if mnemonic.starts_with("mov")
-        || mnemonic == "lea"
-        || mnemonic.starts_with("ldr")
-        || mnemonic.starts_with("str")
-        || mnemonic.starts_with("ldp")
-        || mnemonic.starts_with("stp")
-        || mnemonic.starts_with("adr")
+    } else if starts_with_ignore_ascii_case(mnemonic, "mov")
+        || mnemonic.eq_ignore_ascii_case("lea")
+        || starts_with_ignore_ascii_case(mnemonic, "ldr")
+        || starts_with_ignore_ascii_case(mnemonic, "str")
+        || starts_with_ignore_ascii_case(mnemonic, "ldp")
+        || starts_with_ignore_ascii_case(mnemonic, "stp")
+        || starts_with_ignore_ascii_case(mnemonic, "adr")
     {
         MnemonicCategory::Move
-    } else if mnemonic.starts_with("cmp") || mnemonic == "test" || mnemonic == "tst" {
+    } else if starts_with_ignore_ascii_case(mnemonic, "cmp")
+        || mnemonic.eq_ignore_ascii_case("test")
+        || mnemonic.eq_ignore_ascii_case("tst")
+    {
         MnemonicCategory::Compare
-    } else if mnemonic.starts_with("add")
-        || mnemonic.starts_with("sub")
-        || mnemonic.starts_with("mul")
-        || mnemonic.starts_with("imul")
-        || mnemonic.starts_with("div")
-        || mnemonic.starts_with("idiv")
-        || mnemonic.starts_with("inc")
-        || mnemonic.starts_with("dec")
-        || mnemonic.starts_with("neg")
+    } else if starts_with_ignore_ascii_case(mnemonic, "add")
+        || starts_with_ignore_ascii_case(mnemonic, "sub")
+        || starts_with_ignore_ascii_case(mnemonic, "mul")
+        || starts_with_ignore_ascii_case(mnemonic, "imul")
+        || starts_with_ignore_ascii_case(mnemonic, "div")
+        || starts_with_ignore_ascii_case(mnemonic, "idiv")
+        || starts_with_ignore_ascii_case(mnemonic, "inc")
+        || starts_with_ignore_ascii_case(mnemonic, "dec")
+        || starts_with_ignore_ascii_case(mnemonic, "neg")
     {
         MnemonicCategory::Arithmetic
-    } else if mnemonic.starts_with("and")
-        || mnemonic.starts_with("or")
-        || mnemonic.starts_with("xor")
-        || mnemonic.starts_with("sh")
-        || mnemonic.starts_with("sa")
-        || mnemonic.starts_with("ro")
-        || mnemonic.starts_with("not")
+    } else if starts_with_ignore_ascii_case(mnemonic, "and")
+        || starts_with_ignore_ascii_case(mnemonic, "or")
+        || starts_with_ignore_ascii_case(mnemonic, "xor")
+        || starts_with_ignore_ascii_case(mnemonic, "sh")
+        || starts_with_ignore_ascii_case(mnemonic, "sa")
+        || starts_with_ignore_ascii_case(mnemonic, "ro")
+        || starts_with_ignore_ascii_case(mnemonic, "not")
     {
         MnemonicCategory::Logic
     } else {
         MnemonicCategory::Other
     }
+}
+
+fn matches_exact_ascii_case_any(token: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| token.eq_ignore_ascii_case(candidate))
+}
+
+fn matches_prefixed_digits(token: &str, prefix: &str) -> bool {
+    strip_ascii_case_prefix(token, prefix).is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    strip_ascii_case_prefix(value, prefix).is_some()
+}
+
+fn strip_ascii_case_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = value.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix)
+        .then(|| value.get(prefix.len()..))
+        .flatten()
 }
 
 pub(crate) fn escape_for_terminal(raw: &str) -> String {

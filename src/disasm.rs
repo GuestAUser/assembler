@@ -48,11 +48,12 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
         .with_context(|| format!("failed to parse executable {safe_path}"))?;
 
     let architecture = resolve_file_architecture(&file, request.architecture)?;
+    ensure_supported_endianness(&file, architecture)?;
 
     let capstone = build_capstone(architecture, request.syntax, request.analyze)?;
 
     if !request.symbols.is_empty() {
-        let sections = disassemble_requested_symbols(&file, &capstone, request)?;
+        let sections = disassemble_requested_symbols(&file, &capstone, request, architecture)?;
         let mut metadata = vec![
             ("format".into(), format!("{:?}", file.format())),
             (
@@ -92,11 +93,12 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
         let Ok(name) = section.name() else {
             continue;
         };
-        let safe_name = escape_for_terminal(name);
 
         if !should_disassemble_section(name, section.kind(), section.size(), request) {
             continue;
         }
+
+        let safe_name = escape_for_terminal(name);
 
         let data = section
             .data()
@@ -115,6 +117,7 @@ fn disassemble_file(path: &PathBuf, request: &DisasmRequest) -> Result<Disassemb
             size: section.size(),
             labels: collect_section_labels_for_range(
                 &file,
+                architecture,
                 section.index(),
                 section.address(),
                 section.size(),
@@ -375,6 +378,23 @@ fn map_operand_access(access: capstone::RegAccessType) -> OperandAccess {
     }
 }
 
+fn ensure_supported_endianness(file: &object::File<'_>, architecture: Architecture) -> Result<()> {
+    ensure!(
+        file.endianness() != Endianness::Big,
+        "big-endian objects are not currently supported for {} disassembly",
+        architecture.display_name()
+    );
+
+    Ok(())
+}
+
+fn normalize_code_address(architecture: Architecture, address: u64) -> u64 {
+    match architecture {
+        Architecture::Thumb => address & !1,
+        _ => address,
+    }
+}
+
 fn should_disassemble_section(
     name: &str,
     kind: SectionKind,
@@ -394,6 +414,7 @@ fn should_disassemble_section(
 
 fn collect_section_labels_for_range(
     file: &object::File<'_>,
+    architecture: Architecture,
     target_section: object::SectionIndex,
     address: u64,
     size: u64,
@@ -421,12 +442,13 @@ fn collect_section_labels_for_range(
             continue;
         }
 
-        if !(address..address.saturating_add(size)).contains(&symbol.address()) {
+        let normalized_address = normalize_code_address(architecture, symbol.address());
+        if !(address..address.saturating_add(size)).contains(&normalized_address) {
             continue;
         }
 
         labels
-            .entry(symbol.address())
+            .entry(normalized_address)
             .or_default()
             .push(name.to_owned());
     }
@@ -438,6 +460,7 @@ fn disassemble_requested_symbols(
     file: &object::File<'_>,
     capstone: &Capstone,
     request: &DisasmRequest,
+    architecture: Architecture,
 ) -> Result<Vec<DisassembledSection>> {
     let requested: BTreeSet<&str> = request.symbols.iter().map(String::as_str).collect();
     let mut matched = BTreeSet::new();
@@ -480,8 +503,8 @@ fn disassemble_requested_symbols(
                 escape_for_terminal(section_name)
             )
         })?;
-        let relative_start = symbol
-            .address()
+        let normalized_symbol_address = normalize_code_address(architecture, symbol.address());
+        let relative_start = normalized_symbol_address
             .checked_sub(section.address())
             .ok_or_else(|| {
                 anyhow!(
@@ -514,21 +537,24 @@ fn disassemble_requested_symbols(
         );
 
         let symbol_bytes = &data[start..end];
-        let instructions =
-            disassemble_bytes(capstone, symbol_bytes, symbol.address(), request.analyze)
-                .with_context(|| {
-                    format!("failed to disassemble symbol {}", escape_for_terminal(name))
-                })?;
+        let instructions = disassemble_bytes(
+            capstone,
+            symbol_bytes,
+            normalized_symbol_address,
+            request.analyze,
+        )
+        .with_context(|| format!("failed to disassemble symbol {}", escape_for_terminal(name)))?;
 
         matched.insert(name.to_owned());
         sections.push(DisassembledSection {
             name: format!("{}::{}", section_name, name),
-            address: symbol.address(),
+            address: normalized_symbol_address,
             size: symbol.size(),
             labels: collect_section_labels_for_range(
                 file,
+                architecture,
                 section_index,
-                symbol.address(),
+                normalized_symbol_address,
                 symbol.size(),
             ),
             instructions,

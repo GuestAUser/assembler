@@ -16,11 +16,36 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
       - name: Cargo fmt check
         run: cargo fmt --check
+      - name: Cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
       - name: Cargo test
         run: cargo test
+
+  fixture-verification:
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system cross toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+      - name: Install Rust toolchain with AArch64 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+      - name: Build host fixture binary
+        run: cargo build -p fixtures
+      - name: Verify x86_64 fixture symbols
+        run: nm target/debug/fixtures | grep -c ' fixture_' | awk '$1 >= 10 { exit 0 } { exit 1 }'
+      - name: Build AArch64 fixture binary
+        run: cargo build -p fixtures --target aarch64-unknown-linux-gnu
+      - name: Verify AArch64 fixture symbols
+        run: aarch64-linux-gnu-nm target/aarch64-unknown-linux-gnu/debug/fixtures | grep -c ' fixture_' | awk '$1 >= 2 { exit 0 } { exit 1 }'
+      - name: Run fixture integration tests
+        run: cargo test --test fixtures
 
   smoke:
     runs-on: ubuntu-latest

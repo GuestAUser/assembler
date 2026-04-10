@@ -207,6 +207,43 @@ The analyzer is deliberately conservative.
 - It does **not** attempt source reconstruction or decompilation
 - It does **not** treat weak evidence as proof of a specific overwrite primitive
 
+## Deterministic fixture corpus
+
+The repository includes a dedicated `fixtures/` workspace member for deterministic verification targets. This crate contains hand-authored `global_asm!` symbols rather than compiler-generated Rust or C output, which makes it useful for analyzer regression testing, renderer verification, and cross-architecture expansion without depending on incidental codegen details.
+
+### What the fixtures are for
+
+- exact x86_64 analyzer fixtures for every current finding class
+- exact negative fixtures for false-positive resistance
+- AArch64 renderer fixtures for token and mnemonic verification
+- stable symbol-scoped targets for `--symbol ... --analyze --output json`
+
+### Build the fixture binary
+
+```bash
+cargo build -p fixtures
+```
+
+### Run the fixture integration tests
+
+```bash
+cargo test --test fixtures
+```
+
+### Inspect one positive fixture manually
+
+```bash
+cargo run -- ./target/debug/fixtures --symbol fixture_stack_local_unbounded_loop --analyze --output json
+```
+
+### Fixture authoring rules
+
+- fixture symbols are named with the `fixture_` prefix
+- x86_64 fixtures use exact `global_asm!` instruction sequences and explicit `.size` directives so symbol-scoped disassembly works reliably
+- local labels use the `.L_<fixture_name>_<label>` convention to avoid cross-fixture collisions
+- fixture code lives in `fixtures/`, never in the production `src/` tree
+- AArch64 fixture compilation in CI uses `aarch64-unknown-linux-gnu` plus a Linux cross-linker; the host does not execute the resulting binary, it only disassembles it
+
 ## Reverse-engineering example
 
 `examples/password-login/` contains a compact C target compiled to preserve straightforward machine code:
@@ -269,13 +306,16 @@ examples/password-login/README.md
 | Plain output | supported | default for captured or piped output |
 | ANSI color in plain mode | supported | use `--render plain --color always` |
 | Semantic analysis | supported for x86/x86_64 | enabled with `--analyze` |
-| CI verification | supported | GitHub Actions runs formatting, tests, and smoke verification |
+| CI verification | supported | GitHub Actions runs formatting, clippy, tests, fixture verification, and smoke verification |
 
 ## Verification
 
 ```bash
 cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo build -p fixtures
 cargo test
+cargo test --test fixtures
 bash scripts/smoke.sh
 ```
 
@@ -295,6 +335,7 @@ Expected outcome:
 
 ```text
 src/                         main CLI implementation
+fixtures/                    deterministic assembly fixture corpus
 tests/                       integration tests
 scripts/smoke.sh             quick verification script
 examples/password-login/     reverse-engineering demo target

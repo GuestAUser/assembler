@@ -3,6 +3,9 @@ name = "assembler"
 version = "0.1.0"
 edition = "2024"
 
+[workspace]
+members = ["fixtures"]
+
 [dependencies]
 anyhow = "1.0"
 capstone = "0.12"

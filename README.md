@@ -1,10 +1,14 @@
 # assembler
 
 <p align="center">
-  <strong>A Rust disassembler for raw opcode streams, object-backed executable code, symbol-scoped inspection, and conservative semantic post-processing from the command line.</strong>
+  <strong>A Rust disassembler for raw machine code, object-backed binaries, symbol-scoped inspection, and conservative semantic analysis.</strong>
 </p>
 
-## Output preview
+<p align="center">
+  Built for low-friction terminal workflows, deterministic verification, and evidence-backed output rather than decompiler theater.
+</p>
+
+## Preview
 
 ### Pretty output
 
@@ -24,30 +28,44 @@
   <img src="cape3.png" alt="assembler analysis output" width="100%" />
 </p>
 
-## Overview
+## What this tool is
 
-`assembler` is a terminal-oriented disassembly frontend implemented in Rust. It accepts either raw machine-code bytes or object-backed binaries, decodes instructions through Capstone, resolves section and symbol context through `object`, and renders normalized assembly listings for interactive reverse engineering, shell-driven inspection, and captured output.
+`assembler` is a command-line disassembly frontend implemented in Rust.
 
-The project is intentionally constrained to decoding, rendering, and conservative semantic reporting. It is not a decompiler, source reconstructor, symbolic executor, or exploitability oracle. The analysis mode is designed to stay evidence-backed and architecture-aware rather than turning mnemonic names or imported APIs into unsupported vulnerability claims.
+It:
 
-## Core capabilities
+- decodes raw opcode streams and object-backed executable code through [Capstone](https://github.com/capstone-engine/capstone)
+- resolves section and symbol context through [`object`](https://crates.io/crates/object)
+- renders normalized assembly in either terminal-friendly pretty mode or grep-friendly plain mode
+- emits structured JSON for automation and CI usage
+- optionally runs a conservative semantic analyzer for x86 and x86_64 disassembly
 
-- Decode raw machine code from hex input with explicit architecture selection
-- Disassemble executable sections from ELF and other object-backed binaries parsed through `object`
-- Restrict file disassembly to selected symbols or sections for targeted inspection
-- Emit Intel syntax by default for x86 and x86_64, with optional AT&T syntax via `--syntax att`
-- Render either structured pretty output or flat plain output depending on terminal context and workflow needs
-- Preserve ANSI color support in both render modes
-- Fall back to plain output automatically when stdout is not a TTY
-- Run conservative semantic analysis with `--analyze` for supported x86 and x86_64 disassembly
-- Escape hostile terminal content and enforce explicit input-size limits for safer CLI use
+It is intentionally **not** a decompiler, source reconstructor, symbolic executor, or exploitability oracle.
 
-## Build and execution
+## Design principles
 
-### Requirements
+- **Deterministic decoding surface**: explicit architecture selection when metadata is insufficient; no silent guessing for ARM/Thumb raw modes
+- **Symbol-first workflow**: real binary and object-file inspection with symbol and section filtering instead of only byte-stream demos
+- **Terminal-safe output**: hostile strings are escaped before rendering, and non-interactive output defaults to a stable plain-text layout
+- **Conservative analysis**: findings are derived from operand semantics, memory addressing, and control-flow evidence—not from mnemonic names or imported APIs
+- **Regression-proof development**: fixture binaries use exact `global_asm!` symbols so verification is not hostage to compiler codegen drift
 
-- Rust toolchain with Cargo
-- A working C compiler only if you want to build the demo target in `examples/password-login/`
+## Table of contents
+
+- [Build and installation](#build-and-installation)
+- [Command model](#command-model)
+- [Common workflows](#common-workflows)
+- [Output formats](#output-formats)
+- [Semantic analysis](#semantic-analysis)
+- [Deterministic fixture corpus](#deterministic-fixture-corpus)
+- [Reverse-engineering example](#reverse-engineering-example)
+- [Architecture support and limits](#architecture-support-and-limits)
+- [Safety and robustness](#safety-and-robustness)
+- [Verification](#verification)
+- [Project layout](#project-layout)
+- [Implementation stack](#implementation-stack)
+
+## Build and installation
 
 ### Build from source
 
@@ -55,62 +73,68 @@ The project is intentionally constrained to decoding, rendering, and conservativ
 cargo build --release
 ```
 
+### Install locally
+
+```bash
+cargo install --path .
+```
+
+### Requirements
+
+- Rust toolchain (edition 2024)
+- a C compiler only if you want to build the optional demo target in `examples/password-login/`
+
+## Command model
+
+```text
+assembler [FILE] [OPTIONS]
+assembler --raw-hex <HEX> --arch <ARCH> [OPTIONS]
+```
+
+The CLI operates in two disjoint input modes:
+
+| Mode | Trigger | Decode source |
+|---|---|---|
+| **File mode** | positional `FILE` | section and symbol data from object metadata |
+| **Raw-byte mode** | `--raw-hex <HEX>` | direct decode of user-provided bytes |
+
+Raw-byte mode requires `--arch` because there is no container metadata to infer decode mode safely.
+
+### Core options
+
+| Flag | Meaning |
+|---|---|
+| `--arch <x86\|x86-64\|arm\|thumb\|aarch64>` | force architecture or override file-mode auto detection |
+| `--symbol <NAME>` | restrict file disassembly to one or more symbol names |
+| `--section <NAME>` | restrict file disassembly to one or more section names |
+| `--all-sections` | disassemble every non-empty section instead of executable sections only |
+| `--syntax <intel\|att>` | x86/x86_64 syntax selection |
+| `--render <auto\|pretty\|plain>` | layout selection |
+| `--color <auto\|always\|never>` | ANSI color control |
+| `--output <text\|json>` | human-readable output or structured JSON |
+| `--analyze` | append semantic analysis output |
+| `--analyze-exit-code` | return exit code `1` when analysis findings exist |
+| `--base-address <ADDR>` | override base address for raw-byte decoding |
+
+### Important mode constraints
+
+- `--symbol`, `--section`, and `--all-sections` are **file-mode only**
+- `--base-address` is only meaningful for raw-byte decoding
+- `--syntax att` only affects x86 and x86_64 output
+- ARM object files require explicit `--arch arm` or `--arch thumb`
+
+## Common workflows
+
 ### Show CLI help
 
 ```bash
 cargo run -- --help
 ```
 
-## CLI model
-
-The tool operates in two primary input modes:
-
-1. **Raw-byte mode** via `--raw-hex`
-2. **File mode** via a positional `FILE` argument
-
-Raw-byte disassembly requires an explicit architecture because there is no container metadata to infer decode mode safely. File mode uses object metadata where possible, with explicit ARM/Thumb override support when metadata alone is not sufficient.
-
-### Synopsis
-
-```text
-assembler [FILE] [OPTIONS]
-assembler --raw-hex <HEX> [OPTIONS]
-```
-
-### Primary options
-
-| Option | Purpose | Notes |
-|---|---|---|
-| `FILE` | Binary or object file to disassemble | Required unless `--raw-hex` is provided |
-| `--raw-hex <HEX>` | Decode raw machine code bytes | Conflicts with file input |
-| `--arch <ARCH>` | Force architecture or override decode mode | Required for raw input |
-| `--base-address <ADDR>` | Base address for raw-byte output | Raw mode only in practice |
-| `--all-sections` | Include every non-empty section | Default file mode prefers executable sections |
-| `--section <NAME>` | Restrict file disassembly to named section(s) | May be repeated |
-| `--symbol <NAME>` | Restrict file disassembly to named symbol(s) | File mode only; may be repeated |
-| `--syntax <intel\|att>` | x86/x86_64 syntax selection | Default is `intel` |
-| `--render <auto\|pretty\|plain>` | Output layout selection | `auto` follows TTY state |
-| `--color <auto\|always\|never>` | ANSI color control | `auto` respects terminal conditions |
-| `--analyze` | Run conservative semantic analysis on decoded disassembly | Analysis is currently implemented for x86 and x86_64 |
-
-## Quick-start workflows
-
 ### Decode a minimal x86_64 function from raw bytes
 
 ```bash
 cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64
-```
-
-### Force pretty output
-
-```bash
-cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render pretty --color never
-```
-
-### Force plain output with ANSI color
-
-```bash
-cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render plain --color always
 ```
 
 ### Disassemble a single symbol from a binary
@@ -119,194 +143,228 @@ cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render plain --color 
 cargo run -- ./target/debug/assembler --symbol main
 ```
 
-### Restrict output to selected sections
+### Restrict file output to selected sections
 
 ```bash
 cargo run -- ./target/debug/assembler --section .text --section .init
 ```
 
-### Add semantic analysis to a raw disassembly run
+### Force pretty output without ANSI color
 
 ```bash
-cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --analyze
+cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render pretty --color never
 ```
 
-## Output behavior
+### Force plain output with color
 
-### Render mode
+```bash
+cargo run -- --raw-hex "55 48 89 e5 5d c3" --arch x86-64 --render plain --color always
+```
 
-- `--render auto`
-  - pretty output on interactive terminals
-  - plain output when stdout is captured or piped
-- `--render pretty`
-  - forces structured box-oriented output
-- `--render plain`
-  - forces flat text output suitable for logs, grep, and pipelines
+### Run analysis and get machine-readable JSON
 
-### Color mode
+```bash
+cargo run -- ./target/debug/assembler --symbol main --analyze --output json
+```
 
-- `--color auto`
-  - enables color on interactive terminals
-  - disables color when `NO_COLOR` is present
-  - disables color when `TERM=dumb`
-- `--color always`
-  - forces ANSI color even in plain output
-- `--color never`
-  - disables ANSI color entirely
+### Gate CI on findings
 
-## Architecture support
+```bash
+cargo run -- ./target/debug/assembler --symbol main --analyze --analyze-exit-code
+```
 
-### Supported decode targets
+## Output formats
 
-| Target | Input mode | Notes |
-|---|---|---|
-| x86 | raw bytes, file-backed | Intel syntax default, AT&T optional |
-| x86_64 | raw bytes, file-backed | Intel syntax default, AT&T optional |
-| AArch64 | raw bytes, file-backed when metadata is sufficient | Use `--arch aarch64` for raw input |
-| ARM | file-backed with explicit override | Use `--arch arm` |
-| Thumb | file-backed with explicit override | Use `--arch thumb` |
+### Text output
 
-### Architecture notes
+The text renderer has two layouts:
 
-- Raw-byte disassembly requires `--arch`
-- ARM and Thumb are intentionally explicit in file mode because object metadata alone is not always sufficient to infer the correct decode mode safely
-- `--syntax att` only affects x86 and x86_64 output
+| Mode | Behavior |
+|---|---|
+| `pretty` | structured box layout optimized for interactive reading |
+| `plain` | flat, grep-friendly text optimized for logs, pipes, and captured output |
+| `auto` | pretty on TTYs, plain on captured or piped stdout |
 
-## Semantic analysis mode
+Color behavior:
 
-`--analyze` appends a dedicated analysis section after the disassembly report. The analyzer consumes Capstone detail-mode output and uses typed operand information, memory addressing structure, access direction, and limited frame/loop reconstruction to emit conservative findings.
+| Mode | Behavior |
+|---|---|
+| `auto` | enabled on terminals, disabled when `NO_COLOR` is present or `TERM=dumb` |
+| `always` | ANSI sequences always emitted |
+| `never` | ANSI disabled entirely |
 
-### Current analysis scope
+### JSON output
 
-The current implementation is intended for **x86** and **x86_64** disassembly. For unsupported architectures, analysis mode remains explicit but will report that no architecture-specific semantic analyzer is currently implemented.
+`--output json` emits a stable structured document:
 
-### Finding model
+```json
+{
+  "disassembly": {
+    "target": "...",
+    "architecture": "X86_64",
+    "metadata": [["format", "Elf"], ...],
+    "sections": [...]
+  },
+  "analysis": {
+    "architecture": "X86_64",
+    "findings": [...],
+    "notes": [...]
+  }
+}
+```
 
-Each reported finding is structured around:
+`analysis` is omitted when `--analyze` is not requested.
 
-- finding class
-- severity tier
-- address and section/symbol context
-- factual rationale grounded in decoded instruction behavior
+## Semantic analysis
+
+`--analyze` runs a post-decoding pass that consumes Capstone detail-mode output and reasons over:
+
+- typed operands
+- access direction
+- stack-relative memory addressing
+- frame setup patterns
+- basic-block control flow and loop back-edges
+
+It does **not** inspect rendered text for keywords and does **not** claim exploitability from disassembly alone.
+
+### Internal model
+
+```text
+CLI
+  → DisasmRequest
+  → Capstone decode (detail mode)
+  → DisassemblyReport
+  → analyze()
+  → AnalysisReport
+  → text or JSON render
+```
 
 ### Current finding classes
 
-- potential stack-buffer write risk
-- possible out-of-bounds local write
-- suspicious copy loop
-- unsafe stack-frame write
-- stack-pointer / frame-pointer anomaly
-- indirect write risk
+| Class | Meaning |
+|---|---|
+| `potential-stack-buffer-write-risk` | repeated indexed writes into stack-local memory with evidence that progression exceeds inferred capacity |
+| `possible-out-of-bounds-local-write` | single or loop-driven local write whose offset plus width exceeds inferred frame bounds |
+| `suspicious-copy-loop` | backward-branch write loop with weak or unrecoverable destination bound evidence |
+| `unsafe-stack-frame-write` | write above the local frame through an established frame pointer |
+| `stack-pointer-frame-pointer-anomaly` | indexed write using live stack pointer as base |
+| `indirect-write-risk` | memory write through a non-stack computed pointer |
 
-### Analysis constraints
+### Analysis engine details
 
-The analyzer is deliberately conservative.
+- **frame reconstruction** scans prologue instructions until the first backward branch or call, which handles delayed setups better than a fixed instruction window
+- **CFG construction** builds basic blocks and back-edge relationships instead of relying on flat backward-jump heuristics alone
+- **bound matching** only promotes a loop bound into a finding when the compared register is the one actually driving the memory write progression
+- **finding deduplication** keys on `(kind, address, section, rationale)` so distinct evidence at one address is preserved
+- **bounded-loop suppression** prevents strongly bounded local loops from being reported as suspicious when the proven bound fits the inferred local capacity
 
-- It does **not** claim exploitability from disassembly alone
-- It does **not** promote imported APIs or mnemonic names into findings without behavioral evidence
-- It does **not** attempt source reconstruction or decompilation
-- It does **not** treat weak evidence as proof of a specific overwrite primitive
+### Explicit non-goals
+
+- no decompilation
+- no source reconstruction
+- no symbolic execution
+- no imported-API danger lists turned into fake findings
+- no exploitability claims beyond observed disassembly evidence
 
 ## Deterministic fixture corpus
 
-The repository includes a dedicated `fixtures/` workspace member for deterministic verification targets. This crate contains hand-authored `global_asm!` symbols rather than compiler-generated Rust or C output, which makes it useful for analyzer regression testing, renderer verification, and cross-architecture expansion without depending on incidental codegen details.
+`fixtures/` is a dedicated workspace member that builds a separate verification binary containing exact `global_asm!` symbols.
 
-### What the fixtures are for
+This is a major part of the project’s engineering discipline: analyzer and renderer regressions are validated against precise assembly programs, not compiler-accidental Rust or C code generation.
 
-- exact x86_64 analyzer fixtures for every current finding class
-- exact negative fixtures for false-positive resistance
-- AArch64 renderer fixtures for token and mnemonic verification
-- stable symbol-scoped targets for `--symbol ... --analyze --output json`
+### What the fixtures provide
 
-### Build the fixture binary
+- **positive x86_64 fixtures** for every current analyzer finding class
+- **negative x86_64 fixtures** for false-positive resistance
+- **AArch64 fixtures** for renderer and unsupported-analysis verification
+- **linker-retained symbols** through `extern "C"` declarations plus `#[used]` retention tables
+
+### Representative fixture symbols
+
+| Symbol | Expected result |
+|---|---|
+| `fixture_stack_local_unbounded_loop` | stack-buffer risk + out-of-bounds local write + suspicious copy loop |
+| `fixture_stack_oob_write_no_loop` | out-of-bounds local write only |
+| `fixture_copy_loop_weak_bound` | suspicious loop / weak-bound behavior without overclaiming stronger proof |
+| `fixture_frame_adjacent_write` | unsafe stack-frame write |
+| `fixture_indirect_indexed_store` | indirect write risk |
+| `fixture_indexed_rsp_write` | stack-pointer / frame-pointer anomaly |
+| `fixture_bounded_local_loop` | zero findings |
+| `fixture_compare_only_no_write` | zero findings |
+| `fixture_frame_setup_no_risky_write` | zero findings |
+| `fixture_frame_write_no_setup` | zero findings |
+| `fixture_aarch64_basic_function` | zero findings + unsupported-analysis note |
+
+### Fixture workflow
 
 ```bash
 cargo build -p fixtures
-```
-
-### Run the fixture integration tests
-
-```bash
 cargo test --test fixtures
-```
 
-### Inspect one positive fixture manually
-
-```bash
+# inspect one positive fixture manually
 cargo run -- ./target/debug/fixtures --symbol fixture_stack_local_unbounded_loop --analyze --output json
 ```
 
 ### Fixture authoring rules
 
-- fixture symbols are named with the `fixture_` prefix
-- x86_64 fixtures use exact `global_asm!` instruction sequences and explicit `.size` directives so symbol-scoped disassembly works reliably
-- local labels use the `.L_<fixture_name>_<label>` convention to avoid cross-fixture collisions
-- fixture code lives in `fixtures/`, never in the production `src/` tree
-- AArch64 fixture compilation in CI uses `aarch64-unknown-linux-gnu` plus a Linux cross-linker; the host does not execute the resulting binary, it only disassembles it
+- symbol names use the `fixture_` prefix
+- local labels use `.L_<fixture_name>_<label>`
+- every fixture symbol has an explicit `.size` directive for reliable symbol-scoped disassembly
+- fixture code lives only in `fixtures/`, never in production `src/`
+- fixture verification is Linux/ELF-oriented; AArch64 fixtures are cross-built and disassembled, not executed on the host
 
 ## Reverse-engineering example
 
-`examples/password-login/` contains a compact C target compiled to preserve straightforward machine code:
-
-- debug information is retained
-- inlining is disabled
-- builtin substitution is suppressed
-- the binary is linked as non-PIE
-
-This produces a small ELF sample that is convenient for symbol-scoped inspection and low-level control-flow review.
-
-### Build the demo target
+`examples/password-login/` contains a small C target compiled to preserve readable machine code.
 
 ```bash
-gcc -O0 -g -fno-inline -fno-builtin -no-pie -o examples/password-login/secret_login examples/password-login/secret_login.c
+gcc -O0 -g -fno-inline -fno-builtin -no-pie \
+  -o examples/password-login/secret_login \
+  examples/password-login/secret_login.c
 ```
 
-### Inspect the password-check function
+### Inspect the password check
 
 ```bash
 cargo run -- examples/password-login/secret_login --symbol check_password --render pretty --color never
 ```
 
-### Run the analyzer on the same symbol
+### Analyze the same symbol
 
 ```bash
 cargo run -- examples/password-login/secret_login --symbol check_password --analyze --render plain --color never
 ```
 
-The resulting disassembly exposes `check_password` as a linear sequence of immediate byte comparisons. That makes the validation logic visible directly at the instruction level without requiring a decompiler or source access.
+This function is intentionally a **negative analysis case**: it reveals a secret through immediate byte comparisons, but it does not perform the stack-local copy or repeated write behavior required for a memory-safety finding.
 
-In analysis mode, this example should remain a **negative case** for supported memory-safety findings. The function compares bytes against a caller-controlled pointer, but it does not exhibit the local copy or repeated stack-write behavior required for an overflow-style report.
+See `examples/password-login/README.md` for the full walkthrough.
 
-For the full walkthrough, see:
+## Architecture support and limits
 
-```text
-examples/password-login/README.md
-```
+| Target | Raw bytes | File-backed | Notes |
+|---|---|---|---|
+| x86 | yes | yes | Intel syntax default, AT&T optional |
+| x86_64 | yes | yes | Intel syntax default, AT&T optional |
+| AArch64 | yes | yes | use `--arch aarch64` for raw input |
+| ARM | no | yes | explicit `--arch arm` required |
+| Thumb | no | yes | explicit `--arch thumb` required; bit0 symbol normalization applied |
+
+Important limits:
+
+- raw-byte mode requires `--arch`
+- ARM object files are not silently guessed as ARM vs Thumb
+- big-endian object files are explicitly rejected
+- semantic analysis currently targets **x86** and **x86_64** only
 
 ## Safety and robustness
 
-- Hostile strings are escaped before rendering to reduce terminal-control abuse
-- Pretty output preserves full instruction text instead of clipping operands or labels
-- Raw hex input is capped at **8192 decoded bytes** to bound decode cost and output volume
-- Input files must be regular files and are capped at **128 MiB**
-- Symbol selection is limited to file input and validated with explicit error reporting
-- Non-interactive output defaults to a stable plain-text representation
-
-## Compatibility matrix
-
-| Area | Status | Notes |
-|---|---|---|
-| x86 raw bytes | supported | Intel syntax default, AT&T optional |
-| x86_64 raw bytes | supported | Intel syntax default, AT&T optional |
-| AArch64 raw bytes | supported | use `--arch aarch64` |
-| ARM object files | explicit override required | use `--arch arm` or `--arch thumb` |
-| Symbol filtering | supported for file input | `--symbol` is rejected for raw hex |
-| Section filtering | supported for file input | `--section` may be repeated |
-| Pretty output | supported | default on interactive terminals |
-| Plain output | supported | default for captured or piped output |
-| ANSI color in plain mode | supported | use `--render plain --color always` |
-| Semantic analysis | supported for x86/x86_64 | enabled with `--analyze` |
-| CI verification | supported | GitHub Actions runs formatting, clippy, tests, fixture verification, and smoke verification |
+- terminal-hostile strings are escaped before rendering
+- pretty output preserves full instruction text without clipping operands or labels
+- raw hex input is capped at **8192 decoded bytes**
+- input files must be regular files and are capped at **128 MiB**
+- raw mode rejects file-only flags such as `--symbol`, `--section`, and `--all-sections`
+- Thumb symbol addresses are normalized so label mapping and slicing remain stable on real ELF symbols
+- fixture verification uses explicit symbol retention and `nm` checks instead of assuming the linker kept test-only targets
 
 ## Verification
 
@@ -319,34 +377,60 @@ cargo test --test fixtures
 bash scripts/smoke.sh
 ```
 
-## Manual QA for analysis mode
+CI additionally performs:
 
-```bash
-cargo run -- examples/password-login/secret_login --symbol check_password --analyze --render plain --color never
-cargo run -- --raw-hex "55 48 89 e5 48 83 ec 20 31 c0 c6 44 05 f0 41 48 83 c0 01 48 83 f8 40 75 f1 c9 c3" --arch x86-64 --analyze --render plain --color never
-```
-
-Expected outcome:
-
-- the password example reports no supported memory-safety findings
-- the synthetic raw-hex loop reports evidence-backed findings for repeated stack-local writes and weak destination-bound evidence
+- x86_64 fixture symbol verification with `nm`
+- AArch64 cross-build verification with `aarch64-linux-gnu-gcc`
+- AArch64 fixture symbol verification with `aarch64-linux-gnu-nm`
 
 ## Project layout
 
 ```text
-src/                         main CLI implementation
-fixtures/                    deterministic assembly fixture corpus
-tests/                       integration tests
-scripts/smoke.sh             quick verification script
-examples/password-login/     reverse-engineering demo target
+src/
+  main.rs            entry point and output dispatch
+  cli.rs             CLI model and argument parsing
+  types.rs           shared request/report/instruction data model
+  disasm.rs          Capstone integration, object parsing, symbol resolution
+  render.rs          text rendering, ANSI styling, operand token classification
+  analysis.rs        semantic analyzer, CFG construction, finding model
+
+fixtures/
+  src/main.rs        symbol retention tables and fixture module wiring
+  src/x86_64.rs      exact x86_64 analyzer fixtures
+  src/aarch64.rs     exact AArch64 renderer fixtures
+
+tests/
+  cli.rs             CLI integration tests
+  fixtures.rs        fixture-driven analyzer regression tests
+
+scripts/
+  smoke.sh           quick end-to-end verification
+
+examples/
+  password-login/    reverse-engineering demo target
 ```
 
-## Implementation notes
+## Implementation stack
 
-- Language: Rust 2024 edition
-- Decoder backend: Capstone
-- Object parsing and symbol extraction: `object`
-- CLI parsing: `clap`
-- Error handling: `anyhow`
+| Component | Technology |
+|---|---|
+| Language | Rust 2024 edition |
+| Decoder backend | [Capstone](https://github.com/capstone-engine/capstone) via `capstone` crate |
+| Object parsing | [`object`](https://crates.io/crates/object) |
+| CLI parsing | [`clap`](https://crates.io/crates/clap) derive API |
+| Structured output | [`serde`](https://crates.io/crates/serde) + [`serde_json`](https://crates.io/crates/serde_json) |
+| Error handling | [`anyhow`](https://crates.io/crates/anyhow) |
+| Terminal layout | [`unicode-width`](https://crates.io/crates/unicode-width) |
+| Verification fixtures | `global_asm!` + ELF `.size` directives |
 
-This repository is optimized for low-friction local use: build the binary, point it at raw bytes or a target file, and get deterministic decoded output with optional semantic post-processing from the same command-line entry point.
+## Summary
+
+`assembler` is optimized for the real work of low-level inspection:
+
+- point it at bytes or a binary
+- narrow to the symbol or section you care about
+- get stable, scriptable disassembly output
+- optionally attach conservative semantic findings
+- verify the whole stack against deterministic assembly fixtures
+
+If you want a terminal-native disassembler with explicit architecture handling, disciplined output, and analyzer behavior that is tested against exact machine code instead of wishful abstractions, this repository is built for that workflow.

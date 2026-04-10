@@ -352,6 +352,8 @@ fn analyze_loop(
     for instruction in body {
         for memory in memory_writes(instruction) {
             if let Some(index) = memory.index {
+                let mut suspicious_write = true;
+
                 if is_stack_base(memory.base) {
                     let capacity = estimate_stack_capacity(frame, &memory);
                     if let (Some(bound), Some(capacity), true) = (
@@ -387,6 +389,9 @@ fn analyze_loop(
                                 },
                             );
                         }
+                        if bound <= capacity {
+                            suspicious_write = false;
+                        }
                     } else if frame_supports_stack_capacity(frame, &memory) {
                         push_finding(
                             findings,
@@ -404,7 +409,7 @@ fn analyze_loop(
                     }
                 }
 
-                saw_suspicious_copy = true;
+                saw_suspicious_copy |= suspicious_write;
             }
         }
     }
